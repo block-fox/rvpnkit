@@ -1,0 +1,28 @@
+# ── 构建产物 ──
+bin/
+obj/
+*.user
+*.suo
+
+# ── 原生编译产物 ──
+native/*.exe
+native/*.dll
+native/*.lib
+native/*.a
+native/*.pdb
+native/*.o
+
+# ── 逆向过程中的本地数据（含真实节点信息，绝不外传）──
+recon/captures/
+recon/*.txt
+recon/*_out.txt
+*.log
+
+# ── 环境 ──
+.vs/
+.idea/
+.vscode/
+*.swp
+
+# ── 运行时 ──
+captures/
