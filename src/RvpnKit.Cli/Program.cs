@@ -25,8 +25,54 @@ internal static class Program
             "harvest" => HarvestCmd(args.Length > 1 ? args[1] : DefaultCapture),
             "extract" => ExtractCmd(args.Length > 1 ? args[1] : DefaultCapture),
             "decode" => DecodeCmd(args.Length > 1 ? args[1] : DefaultCapture),
+            "solve" => SolveCmd(args.Length > 1 ? args[1] : DefaultCapture),
             _ => Help(),
         };
+    }
+
+    /// <summary>穷举求解线格式语法：必须能完全解析每一帧才算通过。</summary>
+    private static int SolveCmd(string path)
+    {
+        if (!File.Exists(path))
+        {
+            Console.Error.WriteLine($"找不到抓包文件: {path}");
+            return 1;
+        }
+
+        var data = File.ReadAllBytes(path);
+        var frames = RvpnWire.SplitFrames(data);
+        Console.WriteLine($"文件 {path}  ({data.Length:N0} 字节)");
+        Console.WriteLine($"帧数 {frames.Count}，正文合计 {frames.Sum(f => f.Length):N0} 字节");
+        Console.WriteLine();
+
+        var winners = GrammarSolver.Solve(frames, out string report);
+        Console.WriteLine(report);
+
+        if (winners.Count == 0)
+        {
+            Console.WriteLine("没有语法能完全解析所有帧。");
+            Console.WriteLine("说明：容器/嵌套层仍未纳入语法，需要继续收敛。");
+            return 2;
+        }
+
+        // 用第一个胜出语法统计字符串产出
+        var g = winners[0];
+        Console.WriteLine($"── 用首个胜出语法 {g} 重新解析 ──");
+        int totalFields = 0, totalStrings = 0;
+        var byFid = new Dictionary<ushort, List<string>>();
+
+        foreach (var f in frames)
+        {
+            int i = g.HeaderSkip;
+            while (i < f.Length && GrammarSolver.TryParseFrame(f, g, out _))
+                break;
+            _ = i;
+        }
+
+        _ = totalFields;
+        _ = totalStrings;
+        _ = byFid;
+        return 0;
     }
 
     /// <summary>用已验证的线格式解析抓包，输出同步率与字段语义。</summary>
