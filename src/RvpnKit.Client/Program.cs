@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using RvpnKit.Client;
 using RvpnKit.Protocol;
 
@@ -16,6 +16,8 @@ if (args.Length > 0)
             return await ListAsync();
         case "--probe-write":
             return await ProbeWriteAsync();
+        case "--monitor":
+            return await MonitorAsync();
         case "--help" or "-h":
             PrintHelp();
             return 0;
@@ -35,6 +37,7 @@ static void PrintHelp()
           rvpnkit              显示完整报告（网卡 / 对端 / 节点 / 管道）
           rvpnkit --list       简洁列表输出（制表符分隔，便于脚本处理）
           rvpnkit --json       输出 JSON，便于其它程序消费
+          rvpnkit --monitor    实时监控对端接入/离开与节点活动
           rvpnkit --probe-write  验证控制管道写入是否被服务接收
           rvpnkit --help       显示本帮助
 
@@ -43,6 +46,38 @@ static void PrintHelp()
           · 需要 Radmin VPN 服务运行中
           · 命令下发功能尚未实现（协议格式未完成逆向，详见 docs/OPEN_ISSUE_commands.md）
         """);
+}
+
+/// <summary>
+/// 实时监控：持续显示对端上线/下线与节点身份变化。
+///
+/// <para>这是"查看网络的人"的完整形态 —— 原版界面只给一份静态列表，
+/// 这里能看到成员何时接入、何时离开，以及接入方式。</para>
+/// </summary>
+static async Task<int> MonitorAsync()
+{
+    var monitor = new NetworkMonitor(TimeSpan.FromSeconds(2));
+
+    string Stamp() => DateTime.Now.ToString("HH:mm:ss");
+
+    monitor.PeerAppeared += p =>
+        Console.WriteLine($"[{Stamp()}] ＋ 对端接入  {p.Address,-16} {p.Mac}");
+
+    monitor.PeerDisappeared += p =>
+        Console.WriteLine($"[{Stamp()}] － 对端离开  {p.Address,-16} {p.Mac}");
+
+    monitor.NodeSeen += e =>
+        Console.WriteLine($"[{Stamp()}] ● 节点活动  #{e.NodeId} {e.Alias} " +
+                          $"（{e.ViaText}）");
+
+    Console.WriteLine("RvpnKit 实时监控");
+    Console.WriteLine(new string('─', 70));
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+    await monitor.RunAsync(Console.WriteLine, cts.Token);
+    return 0;
 }
 
 /// <summary>输出 JSON，便于脚本与其它程序消费。</summary>
