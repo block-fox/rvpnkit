@@ -4,14 +4,126 @@ using RvpnKit.Protocol;
 
 Console.OutputEncoding = Encoding.UTF8;
 
+// ── 参数处理必须在任何横幅输出之前完成，
+//    否则 --json 的输出会被横幅污染，无法被脚本解析。
+if (args.Length > 0)
+{
+    switch (args[0])
+    {
+        case "--json":
+            return await JsonAsync();
+        case "--list":
+            return await ListAsync();
+        case "--probe-write":
+            return await ProbeWriteAsync();
+        case "--help" or "-h":
+            PrintHelp();
+            return 0;
+    }
+}
+
 Console.WriteLine("RvpnKit — Radmin VPN 第三方客户端");
 Console.WriteLine("多源聚合：控制管道 + 网卡邻居表 + 服务日志");
 Console.WriteLine(new string('═', 78));
 
-// ── 探测模式：验证管道写入是否被服务接收 ─────────────────────
-if (args.Length > 0 && args[0] == "--probe-write")
+static void PrintHelp()
 {
-    return await ProbeWriteAsync();
+    Console.WriteLine("""
+        RvpnKit — Radmin VPN 第三方客户端
+
+        用法:
+          rvpnkit              显示完整报告（网卡 / 对端 / 节点 / 管道）
+          rvpnkit --list       简洁列表输出（制表符分隔，便于脚本处理）
+          rvpnkit --json       输出 JSON，便于其它程序消费
+          rvpnkit --probe-write  验证控制管道写入是否被服务接收
+          rvpnkit --help       显示本帮助
+
+        说明:
+          · 本工具只读取本机已授权的数据（自己的账号与自己加入的网络）
+          · 需要 Radmin VPN 服务运行中
+          · 命令下发功能尚未实现（协议格式未完成逆向，详见 docs/OPEN_ISSUE_commands.md）
+        """);
+}
+
+/// <summary>输出 JSON，便于脚本与其它程序消费。</summary>
+static async Task<int> JsonAsync()
+{
+    var localIp = PeerTable.LocalVirtualAddress();
+    var peers = PeerTable.Read(localIp);
+    var byNode = ServiceLog.LatestByNode(ServiceLog.Read());
+
+    var doc = new
+    {
+        adapter = new
+        {
+            name = "Radmin VPN",
+            up = PeerTable.IsAdapterUp(),
+            localVirtualIp = localIp?.ToString(),
+        },
+        peers = peers
+            .Where(p => p.HasValidMac)
+            .OrderBy(p => p.Address.GetAddressBytes()[3])
+            .Select(p => new
+            {
+                ip = p.Address.ToString(),
+                mac = p.Mac,
+                state = p.StateText,
+            })
+            .ToArray(),
+        nodes = byNode.Values
+            .OrderByDescending(e => e.Timestamp)
+            .Select(e => new
+            {
+                nodeId = e.NodeId,
+                alias = e.Alias,
+                via = e.Via,
+                viaText = e.ViaText,
+                connected = e.Connected,
+                lastSeen = e.Timestamp == DateTime.MinValue
+                    ? null
+                    : e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
+            })
+            .ToArray(),
+        stats = new
+        {
+            peerCount = peers.Count,
+            peerResolved = peers.Count(p => p.HasValidMac),
+            knownNodes = byNode.Count,
+        },
+    };
+
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc,
+        new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        }));
+    return 0;
+}
+
+/// <summary>简洁列表输出。</summary>
+static async Task<int> ListAsync()
+{
+    var localIp = PeerTable.LocalVirtualAddress();
+    var peers = PeerTable.Read(localIp);
+    var byNode = ServiceLog.LatestByNode(ServiceLog.Read());
+
+    Console.WriteLine($"# 本机虚拟 IP: {localIp?.ToString() ?? "(无)"}");
+    Console.WriteLine($"# 对端 {peers.Count(p => p.HasValidMac)} 个，已知节点 {byNode.Count} 个");
+    Console.WriteLine();
+    Console.WriteLine("# 邻居表对端（虚拟 IP / MAC）");
+    foreach (var p in peers.Where(p => p.HasValidMac)
+                           .OrderBy(p => p.Address.GetAddressBytes()[3]))
+        Console.WriteLine($"{p.Address}\t{p.Mac}");
+
+    Console.WriteLine();
+    Console.WriteLine("# 已知节点（节点ID / 别名 / 连接方式 / 最近活动）");
+    foreach (var e in byNode.Values.OrderByDescending(x => x.Timestamp).Take(200))
+        Console.WriteLine($"{e.NodeId}\t{e.Alias}\t{e.ViaText}\t" +
+                          $"{(e.Timestamp == DateTime.MinValue ? "—" : e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"))}");
+
+    await Task.CompletedTask;
+    return 0;
 }
 
 /// <summary>
