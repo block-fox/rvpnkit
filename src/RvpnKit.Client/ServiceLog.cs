@@ -74,6 +74,11 @@ public static class ServiceLog
     /// </summary>
     /// <param name="directory">日志目录，默认 <see cref="DefaultDirectory"/></param>
     /// <param name="maxFiles">最多读取最新的多少个日志文件</param>
+    /// <remarks>
+    /// <b>编码说明：</b>服务写出的日志是 <b>UTF-16LE（带 BOM）</b>，
+    /// 早期按 UTF-8 读取会丢掉一半字节。这里通过 BOM 自动判定编码，
+    /// 同时兼容可能的 UTF-8 变体。
+    /// </remarks>
     public static List<Entry> Read(string directory = DefaultDirectory, int maxFiles = 8)
     {
         var entries = new List<Entry>();
@@ -90,7 +95,7 @@ public static class ServiceLog
                 // 日志可能正被服务写入，用共享读方式打开
                 using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Read,
                                               FileShare.ReadWrite);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
+                using var reader = new StreamReader(fs, DetectEncoding(fs), detectEncodingFromByteOrderMarks: true);
 
                 while (reader.ReadLine() is { } line)
                 {
@@ -124,6 +129,26 @@ public static class ServiceLog
         }
 
         return entries;
+    }
+
+    /// <summary>按 BOM 判定日志编码；无语义前缀时退回 UTF-16LE（服务实际写法）。</summary>
+    private static Encoding DetectEncoding(FileStream fs)
+    {
+        Span<byte> head = stackalloc byte[4];
+        long pos = fs.Position;
+        int n = fs.Read(head);
+        fs.Position = pos;
+
+        if (n >= 2)
+        {
+            if (head[0] == 0xFF && head[1] == 0xFE) return Encoding.Unicode;        // UTF-16LE
+            if (head[0] == 0xFE && head[1] == 0xFF) return Encoding.BigEndianUnicode;
+        }
+        if (n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF)
+            return Encoding.UTF8;
+
+        // 无 BOM：若第 2 字节为 0 说明是 UTF-16LE 文本
+        return n >= 2 && head[1] == 0x00 ? Encoding.Unicode : Encoding.UTF8;
     }
 
     /// <summary>把记录按节点 ID 归并，保留每个节点最近一次成功的连接。</summary>
