@@ -10,6 +10,50 @@
 
 ---
 
+## 快速上手
+
+```powershell
+# 1. 编译
+dotnet build src/RvpnKit.Client/RvpnKit.Client.csproj -c Release
+
+# 2. 运行（需要 Radmin VPN 服务在运行）
+src/RvpnKit.Client/bin/Release/net10.0/rvpnkit.exe
+```
+
+### 四种输出模式
+
+| 命令 | 用途 |
+|---|---|
+| `rvpnkit` | 完整报告：网卡状态 / 对端列表 / 节点身份 / 管道状态 |
+| `rvpnkit --list` | 制表符分隔列表，便于 `Select-String`、`awk` 等处理 |
+| `rvpnkit --json` | JSON 输出，便于脚本或其它程序消费 |
+| `rvpnkit --monitor` | **实时监控**：成员接入/离开、节点活动 |
+
+### 实测输出
+
+```
+$ rvpnkit --json | ConvertFrom-Json | Select-Object -ExpandProperty stats
+
+peerCount     peerResolved   knownNodes
+---------     ------------   ----------
+120           119            1542
+```
+
+```
+$ rvpnkit --monitor
+已建立基线：对端 119 个，节点 9 个
+开始监控（Ctrl+C 退出）…
+
+[03:35:18] ● 节点活动  #167568271 SNJUN （—）
+[03:36:02] ＋ 对端接入  26.39.241.20     02-50-0D-8F-55-CA
+[03:37:11] － 对端离开  26.39.241.20     02-50-0D-8F-55-CA
+```
+
+> **注意**：`--monitor` 首次轮询会**静默建立基线**，不会把历史对端误报成"刚刚接入"。
+> 只有基线之后出现的变化才会打印。
+
+---
+
 ## 特性
 
 | 功能 | 状态 |
