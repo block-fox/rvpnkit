@@ -49,7 +49,9 @@ public sealed class RvpnPipe : IDisposable
         });
 
     private readonly List<byte> _pending = new(1 << 16);
+    private readonly Lock _writeLock = new();
     private SafeFileHandle? _handle;
+    private bool _readOnly;
     private Thread? _reader;
     private volatile bool _disposed;
     private volatile bool _readerDone;
@@ -65,6 +67,11 @@ public sealed class RvpnPipe : IDisposable
     private static extern bool ReadFile(SafeFileHandle hFile, byte[] buffer,
                                         int nBytesToRead, out int nBytesRead,
                                         IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteFile(SafeFileHandle hFile, byte[] buffer,
+                                         int nBytesToWrite, out int nBytesWritten,
+                                         IntPtr lpOverlapped);
 
     /// <summary>是否已连接且读线程仍在工作。</summary>
     public bool IsConnected =>
@@ -82,34 +89,97 @@ public sealed class RvpnPipe : IDisposable
     /// <summary>
     /// 连接控制管道。
     ///
-    /// <para><b>关键：必须以「只读」权限打开。</b>实测该管道的 ACL 只授予读权限，
-    /// 请求 <c>GENERIC_READ | GENERIC_WRITE</c> 会被拒绝（Win32 错误 5）。
-    /// 探测结果：只读 ✓ / 读写 ✗ / 只写 ✗ / 0 权限 → 231。</para>
+    /// <para><b>访问权限（实测结论）：</b>该管道在权限上<b>允许读写打开</b> ——
+    /// Python 侧连续 12 次读写打开全部成功。但从 <b>.NET 进程</b>发起读写打开时
+    /// 会出现 ERROR_ACCESS_DENIED（错误 5），而只读打开始终成功。原因尚未定位，
+    /// 推测与 .NET 打开管道时请求的附加访问位有关。</para>
     ///
-    /// <para>这也说明<b>写路径需要别的途径</b>：本客户端无法通过该管道下发命令。</para>
+    /// <para>因此本方法采用<b>降级策略</b>：先尝试读写（可发送命令），失败则退回
+    /// 只读（仅监控）。这样客户端在任何情况下都能工作，只是写能力可能被禁用。</para>
     /// </summary>
-    /// <exception cref="IOException">连接失败，异常数据里带 Win32 错误码。</exception>
+    /// <exception cref="IOException">两种模式都失败时抛出，异常数据里带 Win32 错误码。</exception>
     public void Connect()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var h = CreateFileW(PipeName, GENERIC_READ, 0, IntPtr.Zero,
+        // 先试读写：成功则具备下发命令的能力
+        var h = CreateFileW(PipeName, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero,
                             OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h.IsInvalid)
+        if (!h.IsInvalid)
         {
-            int err = Marshal.GetLastWin32Error();
-            var ex = new IOException(DescribeConnectError(err), err);
-            ex.Data[Win32ErrorKey] = err;
-            throw ex;
+            _handle = h;
+            _readOnly = false;
+        }
+        else
+        {
+            int firstErr = Marshal.GetLastWin32Error();
+
+            // 降级：只读打开（监控模式）
+            h = CreateFileW(PipeName, GENERIC_READ, 0, IntPtr.Zero,
+                            OPEN_EXISTING, 0, IntPtr.Zero);
+            if (h.IsInvalid)
+            {
+                int err = Marshal.GetLastWin32Error();
+                var ex = new IOException(
+                    DescribeConnectError(err) +
+                    $"\n  （读写模式曾返回错误 {firstErr}）", err);
+                ex.Data[Win32ErrorKey] = err;
+                throw ex;
+            }
+
+            _handle = h;
+            _readOnly = true;
         }
 
-        _handle = h;
         _reader = new Thread(ReaderLoop)
         {
             IsBackground = true,
             Name = "rvpn-pipe-reader",
         };
         _reader.Start();
+    }
+
+    /// <summary>是否以只读方式连接（此时无法下发命令）。</summary>
+    public bool IsReadOnly => _readOnly;
+
+    /// <summary>是否具备写入能力（以读写模式打开时成立）。</summary>
+    public bool CanWrite => IsConnected && !_readOnly;
+
+    /// <summary>
+    /// 向服务端发送一帧（4 字节 LE 长度前缀 + 正文）。
+    ///
+    /// <para><b>警告：</b>命令正文的编码尚未完成逆向。此 API 目前仅用于受控实验
+    /// （例如发送畸形帧以观察服务的错误响应）。</para>
+    /// </summary>
+    /// <returns>实际写入的字节数。</returns>
+    public Task<int> SendAsync(byte[] frameBody, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var h = _handle;
+        if (h is null || h.IsInvalid || h.IsClosed)
+            throw new InvalidOperationException("尚未调用 Connect()，或连接已关闭");
+        if (_readOnly)
+            throw new InvalidOperationException(
+                "当前为只读连接（监控模式），无法下发命令。\n" +
+                "  读写打开被拒绝；可尝试关闭官方 Radmin VPN 界面后重试。");
+        if (frameBody.Length == 0) return Task.FromResult(0);
+
+        var buffer = new byte[4 + frameBody.Length];
+        BinaryPrimitives.WriteInt32LittleEndian(buffer, frameBody.Length);
+        frameBody.CopyTo(buffer, 4);
+
+        // 写操作与读线程共用句柄；命名管道允许一读一写并发，
+        // 但把写串行化可以避免交错的帧破坏服务端解析。
+        lock (_writeLock)
+        {
+            if (!WriteFile(h, buffer, buffer.Length, out int written, IntPtr.Zero))
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new IOException($"写入管道失败，Win32 错误 {err}", err);
+            }
+            return Task.FromResult(written);
+        }
     }
 
     /// <summary>带重试的连接：管道忙时反复尝试，直到超时。</summary>

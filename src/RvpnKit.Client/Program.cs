@@ -8,6 +8,142 @@ Console.WriteLine("RvpnKit — Radmin VPN 第三方客户端");
 Console.WriteLine("多源聚合：控制管道 + 网卡邻居表 + 服务日志");
 Console.WriteLine(new string('═', 78));
 
+// ── 探测模式：验证管道写入是否被服务接收 ─────────────────────
+if (args.Length > 0 && args[0] == "--probe-write")
+{
+    return await ProbeWriteAsync();
+}
+
+/// <summary>
+/// 验证「向控制管道写入」是否真的被服务处理。
+///
+/// <para>做法：记录服务日志当前的尾部，发送一个<b>最小畸形帧</b>，随后观察日志是否
+/// 出现新的 <c>[req:N] ...</c> 记录。服务对每个请求都会编号并记录成功/失败，
+/// 因此只要出现新记录，就证明写入路径已经打通。</para>
+///
+/// <para>发送畸形帧是刻意的：它最不可能被误解释为有效命令，从而把对真实网络状态的
+/// 影响降到最低。</para>
+/// </summary>
+static async Task<int> ProbeWriteAsync()
+{
+    var logDir = ServiceLog.DefaultDirectory;
+    Console.WriteLine("═══ 管道写入探测 ═══");
+    Console.WriteLine($"日志目录: {logDir}");
+    Console.WriteLine();
+
+    // 1. 记录探测前的日志状态
+    var before = SnapshotLogs(logDir);
+    Console.WriteLine($"探测前：{before.Count} 个日志文件");
+
+    using var pipe = new RvpnPipe();
+    try
+    {
+        pipe.Connect();
+    }
+    catch (IOException ex)
+    {
+        Console.Error.WriteLine($"✗ 连接失败: {ex.Message}");
+        return 1;
+    }
+
+    Console.WriteLine($"✓ 已连接（可写: {pipe.CanWrite}）");
+
+    // 2. 发送最小畸形帧：长度为 1，正文只有一个 0x00
+    //    服务解析必然失败，只会在日志里留一条失败记录
+    byte[] probe = [0x00];
+    try
+    {
+        int sent = await pipe.SendAsync(probe, CancellationToken.None);
+        Console.WriteLine($"✓ 已写入 {sent} 字节（长度前缀 + 1 字节正文）");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"✗ 写入失败: {ex.GetType().Name}: {ex.Message}");
+        return 2;
+    }
+
+    // 3. 观察日志变化（最多 8 秒）
+    Console.WriteLine("观察服务日志变化…");
+    var deadline = DateTime.UtcNow.AddSeconds(8);
+    bool sawNew = false;
+    while (DateTime.UtcNow < deadline)
+    {
+        await Task.Delay(500);
+        var now = SnapshotLogs(logDir);
+
+        foreach (var (file, size) in now)
+        {
+            if (before.TryGetValue(file, out long oldSize) && size > oldSize)
+            {
+                var added = ReadTail(file, oldSize, size);
+                if (added.Any(l => l.Contains("[req:", StringComparison.Ordinal)))
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("★ 服务日志出现新请求记录：");
+                    foreach (var line in added.Where(l => l.Contains("[req:", StringComparison.Ordinal)).Take(5))
+                        Console.WriteLine("   " + line.Trim());
+                    sawNew = true;
+                }
+            }
+            else if (!before.ContainsKey(file))
+            {
+                Console.WriteLine($"  （出现新日志文件: {Path.GetFileName(file)}）");
+            }
+        }
+
+        if (sawNew) break;
+        if (pipe.ReaderCompleted)
+        {
+            Console.WriteLine($"  （服务已关闭读端，Win32 错误 {pipe.ReadError}）");
+            break;
+        }
+    }
+
+    Console.WriteLine();
+    if (sawNew)
+    {
+        Console.WriteLine("═══ 结论 ═══");
+        Console.WriteLine("✓ 写入路径已打通：服务接收并处理了我们发送的数据。");
+        Console.WriteLine("  下一步只需构造格式正确的命令报文即可实现「加入网络」等写操作。");
+        return 0;
+    }
+
+    Console.WriteLine("═══ 结论 ═══");
+    Console.WriteLine("未观察到服务记录新请求。可能原因：");
+    Console.WriteLine("  · 服务直接丢弃了无法解析的帧（未记日志）");
+    Console.WriteLine("  · 日志写入有缓冲延迟，8 秒窗口不够");
+    Console.WriteLine("  · 帧格式要求比预期更严格（例如需要完整的头部）");
+    return 3;
+}
+
+/// <summary>记录日志目录下各文件的大小。</summary>
+static Dictionary<string, long> SnapshotLogs(string dir)
+{
+    var map = new Dictionary<string, long>();
+    if (!Directory.Exists(dir)) return map;
+    foreach (var f in Directory.GetFiles(dir, "service*.log"))
+    {
+        try { map[f] = new FileInfo(f).Length; } catch (IOException) { }
+    }
+    return map;
+}
+
+/// <summary>读取一个日志文件在 [from, to) 区间内新增的文本行。</summary>
+static List<string> ReadTail(string path, long from, long to)
+{
+    var lines = new List<string>();
+    try
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        fs.Seek(from, SeekOrigin.Begin);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        while (reader.ReadLine() is { } line && fs.Position <= to)
+            lines.Add(line);
+    }
+    catch (IOException) { }
+    return lines;
+}
+
 // ── ① 网络状态 ───────────────────────────────────────────────
 var localIp = PeerTable.LocalVirtualAddress();
 bool adapterUp = PeerTable.IsAdapterUp();
