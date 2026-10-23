@@ -105,6 +105,16 @@ public sealed class RvpnPipe : IDisposable
         // 先试读写：成功则具备下发命令的能力
         var h = CreateFileW(PipeName, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero,
                             OPEN_EXISTING, 0, IntPtr.Zero);
+        // 必须在任何其它托管调用之前取错误码，否则会被 SafeFileHandle 的
+        // 释放流程把 last error 清成 0（本项目踩过这个坑）。
+        int rwErr = Marshal.GetLastWin32Error();
+        if (Environment.GetEnvironmentVariable("RVPNKIT_DEBUG_PIPE") == "1")
+        {
+            Console.Error.WriteLine(
+                $"[debug] CreateFileW(RW) raw=0x{h.DangerousGetHandle().ToInt64():x} " +
+                $"invalid={h.IsInvalid} err={rwErr} " +
+                $"access=0x{(GENERIC_READ | GENERIC_WRITE):x8} open={OPEN_EXISTING}");
+        }
         if (!h.IsInvalid)
         {
             _handle = h;
@@ -112,7 +122,7 @@ public sealed class RvpnPipe : IDisposable
         }
         else
         {
-            int firstErr = Marshal.GetLastWin32Error();
+            int firstErr = rwErr;
 
             // 降级：只读打开（监控模式）
             h = CreateFileW(PipeName, GENERIC_READ, 0, IntPtr.Zero,

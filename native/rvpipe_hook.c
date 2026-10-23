@@ -127,6 +127,21 @@ static BOOL is_pipe(HANDLE h)
 
 /* ------------------------------------------------------------ the hooks */
 
+/*
+ * Radmin 控制帧的信封魔数。
+ *
+ * 只靠「是不是命名管道」过滤不够：放宽后会把系统其它管道的流量也录进来
+ * （实测抓到大量 protobuf 遥测，payload 里甚至带 RvRvpnGui.exe 字样，
+ *  极易误判为命令）。Radmin 的帧固定以这 6 字节开头，用它精确过滤。
+ */
+static const BYTE g_magic[6] = { 0x00, 0x00, 0x00, 0x04, 0x01, 0x00 };
+
+static BOOL looks_like_radmin(const void *buf, DWORD n)
+{
+    if (!buf || n < sizeof(g_magic)) return FALSE;
+    return memcmp(buf, g_magic, sizeof(g_magic)) == 0;
+}
+
 static HANDLE WINAPI hook_CreateFileW(LPCWSTR name, DWORD access, DWORD share,
                                       LPSECURITY_ATTRIBUTES sa, DWORD disp,
                                       DWORD flags, HANDLE tmpl)
@@ -151,8 +166,8 @@ static BOOL WINAPI hook_WriteFile(HANDLE h, LPCVOID buf, DWORD n,
     WriteFile_t real = (WriteFile_t)g_realWrite;
     BOOL ok;
 
-    /* 只记录控制管道上的写入；长度用调用方给出的 n，天然安全。 */
-    if (buf && n && n <= 1024 * 1024 && is_pipe(h)) {
+    /* 长度用调用方给出的 n，天然安全 */
+    if (buf && n <= 1024 * 1024 && is_pipe(h) && looks_like_radmin(buf, n)) {
         if (g_lockReady) EnterCriticalSection(&g_lock);
         dump_to_buffer("OUT (WriteFile)", buf, n);
         if (g_lockReady) LeaveCriticalSection(&g_lock);

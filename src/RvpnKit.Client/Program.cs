@@ -18,6 +18,12 @@ if (args.Length > 0)
             return await ListAsync();
         case "--probe-write":
             return await ProbeWriteAsync();
+        case "--join" when args.Length > 1:
+            return await JoinNetworkAsync(args[1],
+                args.Length > 2 && args[2] is "--dump");
+        case "--join":
+            Console.Error.WriteLine("用法: rvpnkit --join \"网络名\"");
+            return 2;
         case "--monitor":
             return await MonitorAsync();
         case "--no-color":
@@ -46,6 +52,8 @@ static void PrintHelp()
     t.Add("rvpnkit --list", "制表符分隔列表（无装饰，便于脚本处理）");
     t.Add("rvpnkit --monitor", "实时监控：成员上线 / 下线 / 节点活动");
     t.Add("rvpnkit --probe-write", "验证控制管道写入是否被服务接收");
+    t.Add("rvpnkit --join \"网络名\"", "加入指定网络（命令格式已逆向并验证）");
+    t.Add("rvpnkit --join \"网络名\" --dump", "同上，并打印构造出的命令帧十六进制");
     t.Add("rvpnkit --no-color", "关闭配色（也尊重 NO_COLOR 环境变量）");
     t.Add("rvpnkit --help", "显示本帮助");
     t.Render();
@@ -318,6 +326,109 @@ static async Task<int> ListAsync()
                           $"{(e.Timestamp == DateTime.MinValue ? "—" : e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"))}");
 
     return 0;
+}
+
+/// <summary>
+/// 加入一个 Radmin VPN 网络。
+///
+/// <para>命令帧由 <see cref="CommandBuilder.JoinNetwork"/> 按真实报文逆向出的格式
+/// 构造：整体是「请求 ID 记录 + 命令码记录 + 容器记录」，容器里带一个 u8 字段和
+/// 一个 UTF-16LE 的网络名。服务端会为每个请求编号，成功的加入会写
+/// <c>[req:N] Requested to join network '...'</c> 与
+/// <c>You joined gaming network '...'</c> 两条日志，因此可以直接用它验证结果。</para>
+/// </summary>
+/// <param name="name">要加入的网络名（需与服务器上的完全一致）。</param>
+/// <param name="dump">是否把构造出的命令帧按十六进制打印出来。</param>
+static async Task<int> JoinNetworkAsync(string name, bool dump)
+{
+    Ui.Banner("加入网络");
+
+    // 请求编号取当前时间的毫秒低 16 位：服务端只把它当标识回显，
+    // 不需要全局唯一，但要避免与官方 GUI 的递增值撞车得太频繁。
+    uint reqId = (uint)(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond) & 0xFFFF;
+    byte[] frame = CommandBuilder.JoinNetwork(name, reqId);
+
+    Console.WriteLine();
+    Console.WriteLine($"  网络名    {name}");
+    Console.WriteLine($"  请求编号  {reqId} (0x{reqId:x})");
+    Console.WriteLine($"  帧长度    {frame.Length} 字节（正文，不含 4 字节长度前缀）");
+    Console.WriteLine($"  编码后名  {System.Text.Encoding.Unicode.GetByteCount(name)} 字节 UTF-16LE");
+    Console.WriteLine();
+
+    if (dump)
+    {
+        Console.WriteLine("  帧内容：");
+        Console.Write(CommandBuilder.ToHexDump(frame));
+        Console.WriteLine();
+    }
+
+    var logDir = ServiceLog.DefaultDirectory;
+    var before = SnapshotLogs(logDir);
+
+    using var pipe = new RvpnPipe();
+    try
+    {
+        pipe.Connect();
+    }
+    catch (IOException ex)
+    {
+        Console.Error.WriteLine($"✗ 连接控制管道失败: {ex.Message}");
+        return 1;
+    }
+
+    if (!pipe.CanWrite)
+    {
+        Console.Error.WriteLine("✗ 当前连接是只读的，无法下发命令。");
+        Console.Error.WriteLine("  请先关闭官方 Radmin VPN 界面再重试（管道实例被它占用）。");
+        return 2;
+    }
+
+    try
+    {
+        int sent = await pipe.SendAsync(frame, CancellationToken.None);
+        Console.WriteLine($"  ✓ 已写入 {sent} 字节");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"✗ 写入失败: {ex.GetType().Name}: {ex.Message}");
+        return 3;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("  等待服务处理…");
+
+    // 观察服务日志，确认请求被接受
+    var deadline = DateTime.UtcNow.AddSeconds(10);
+    string? joined = null;
+    while (DateTime.UtcNow < deadline)
+    {
+        await Task.Delay(400);
+        foreach (var (file, size) in SnapshotLogs(logDir))
+        {
+            if (!before.TryGetValue(file, out long oldSize) || size <= oldSize) continue;
+            foreach (string line in ReadTail(file, oldSize, size))
+            {
+                if (line.Contains($"[req:{reqId}]", StringComparison.Ordinal) &&
+                    line.Contains("Succeeded", StringComparison.Ordinal))
+                    joined = line;
+                if (line.Contains("You joined", StringComparison.Ordinal))
+                    joined = line;
+            }
+        }
+        if (joined is not null) break;
+    }
+
+    Console.WriteLine();
+    if (joined is not null)
+    {
+        Console.WriteLine($"  ✓ 加入成功：{joined.Trim()}");
+        return 0;
+    }
+
+    Console.WriteLine("  ⚠ 未在服务日志中看到确认。");
+    Console.WriteLine("    可能原因：网络名不匹配、网络需要密码、或服务端已满。");
+    Console.WriteLine($"    可直接查看: {logDir}");
+    return 4;
 }
 
 /// <summary>
