@@ -1,11 +1,13 @@
 using System.Text;
 using RvpnKit.Client;
 using RvpnKit.Protocol;
+using static RvpnKit.Client.Ui;
 
 Console.OutputEncoding = Encoding.UTF8;
 
 // ── 参数处理必须在任何横幅输出之前完成，
 //    否则 --json 的输出会被横幅污染，无法被脚本解析。
+bool showAll = false;
 if (args.Length > 0)
 {
     switch (args[0])
@@ -18,34 +20,42 @@ if (args.Length > 0)
             return await ProbeWriteAsync();
         case "--monitor":
             return await MonitorAsync();
+        case "--no-color":
+            Ui.DisableColor();
+            break;                       // 继续走默认报告
+        case "--all":
+            showAll = true;              // 成员列表不截断
+            break;
         case "--help" or "-h":
             PrintHelp();
             return 0;
     }
 }
 
-Console.WriteLine("RvpnKit — Radmin VPN 第三方客户端");
-Console.WriteLine("多源聚合：控制管道 + 网卡邻居表 + 服务日志");
-Console.WriteLine(new string('═', 78));
+Ui.Banner("Radmin VPN 第三方客户端 · 多源聚合监控");
 
 static void PrintHelp()
 {
-    Console.WriteLine("""
-        RvpnKit — Radmin VPN 第三方客户端
+    Ui.Banner("命令行帮助");
+    Console.WriteLine("  用法");
+    Console.WriteLine();
+    var t = new Ui.Table(["命令", "作用"]);
+    t.Add("rvpnkit", "完整报告：网卡 / 对端 / 成员身份 / 活跃节点");
+    t.Add("rvpnkit --all", "同上，但成员列表不截断（默认只显示前 30）");
+    t.Add("rvpnkit --json", "JSON 输出，便于其它程序消费（无装饰）");
+    t.Add("rvpnkit --list", "制表符分隔列表（无装饰，便于脚本处理）");
+    t.Add("rvpnkit --monitor", "实时监控：成员上线 / 下线 / 节点活动");
+    t.Add("rvpnkit --probe-write", "验证控制管道写入是否被服务接收");
+    t.Add("rvpnkit --no-color", "关闭配色（也尊重 NO_COLOR 环境变量）");
+    t.Add("rvpnkit --help", "显示本帮助");
+    t.Render();
 
-        用法:
-          rvpnkit              显示完整报告（网卡 / 对端 / 节点 / 管道）
-          rvpnkit --list       简洁列表输出（制表符分隔，便于脚本处理）
-          rvpnkit --json       输出 JSON，便于其它程序消费
-          rvpnkit --monitor    实时监控对端接入/离开与节点活动
-          rvpnkit --probe-write  验证控制管道写入是否被服务接收
-          rvpnkit --help       显示本帮助
-
-        说明:
-          · 本工具只读取本机已授权的数据（自己的账号与自己加入的网络）
-          · 需要 Radmin VPN 服务运行中
-          · 命令下发功能尚未实现（协议格式未完成逆向，详见 docs/OPEN_ISSUE_commands.md）
-        """);
+    Console.WriteLine();
+    Console.WriteLine("  " + Paint("说明", Sgr.Bold));
+    Console.WriteLine("    " + Paint("· 只读取本机已授权的数据（自己的账号与自己加入的网络）", Sgr.Grey));
+    Console.WriteLine("    " + Paint("· 需要 Radmin VPN 服务运行中", Sgr.Grey));
+    Console.WriteLine("    " + Paint("· 命令下发功能尚未实现，原因见 docs/OPEN_ISSUE_commands.md", Sgr.Grey));
+    Console.WriteLine();
 }
 
 /// <summary>
@@ -58,44 +68,73 @@ static async Task<int> MonitorAsync()
 {
     var monitor = new NetworkMonitor(TimeSpan.FromSeconds(2));
 
-    string Stamp() => DateTime.Now.ToString("HH:mm:ss");
+    string Stamp() => Paint(DateTime.Now.ToString("HH:mm:ss"), Sgr.Grey);
+
+    Ui.Banner("实时监控 · 成员上下线与节点活动");
 
     // 先解析一次「IP → 别名」，这样事件里能直接显示是谁
-    Console.WriteLine("正在解析成员身份…");
+    Console.WriteLine("  " + Paint("正在解析成员身份…", Sgr.Dim));
     var byNode = ServiceLog.LatestByNode(ServiceLog.Read());
     var known = new HashSet<string>(
         byNode.Values.Select(e => e.Alias).Where(a => !string.IsNullOrWhiteSpace(a)),
         StringComparer.Ordinal);
     var (bindings, _, _) = await CollectBindingsAsync(known, TimeSpan.FromSeconds(6));
     monitor.SetAliases(bindings);
-    Console.WriteLine($"已识别 {bindings.Count} 个成员身份。");
+    Console.WriteLine("  " + Paint("✓", Sgr.Green) + " 已识别 " +
+                      Paint($"{bindings.Count}", Sgr.Bold + Sgr.Magenta) +
+                      " 个成员身份");
 
     string Who(string ip)
     {
         string? alias = monitor.AliasOf(ip);
-        return alias is null ? "（未知）" : alias;
+        return alias is null ? Paint("（未知）", Sgr.Grey) : Paint(alias, Sgr.Magenta);
     }
 
+    // 事件行统一宽度，让时间戳与箭头对齐
+    const int ipWidth = 17;
+    const int whoWidth = 26;
+
     monitor.PeerAppeared += p =>
-        Console.WriteLine($"[{Stamp()}] ＋ 上线  {p.Address,-16} {Who(p.Address.ToString()),-24} " +
-                          $"{p.Mac}");
+    {
+        string ip = p.Address.ToString();
+        Console.WriteLine($"  [{Stamp()}] {Paint("＋", Sgr.Green)} " +
+                          $"{Paint(PadRight(ip, ipWidth), Sgr.Cyan)} " +
+                          $"{PadRight(Who(ip), whoWidth)} " +
+                          $"{Paint(p.Mac, Sgr.Grey)}");
+    };
 
     monitor.PeerDisappeared += p =>
-        Console.WriteLine($"[{Stamp()}] － 下线  {p.Address,-16} {Who(p.Address.ToString()),-24} " +
-                          $"{p.Mac}");
+    {
+        string ip = p.Address.ToString();
+        Console.WriteLine($"  [{Stamp()}] {Paint("－", Sgr.Red)} " +
+                          $"{Paint(PadRight(ip, ipWidth), Sgr.Cyan)} " +
+                          $"{PadRight(Who(ip), whoWidth)} " +
+                          $"{Paint(p.Mac, Sgr.Grey)}");
+    };
 
     monitor.NodeSeen += e =>
-        Console.WriteLine($"[{Stamp()}] ● 活动  #{e.NodeId,-11} {e.Alias,-24} " +
-                          $"（{e.ViaText}）");
+    {
+        string mark = e.ViaText.Contains("UDP") ? Paint("◆", Sgr.Green)
+                    : e.ViaText.Contains("中继") ? Paint("◆", Sgr.Yellow)
+                    : Paint("◆", Sgr.Cyan);
+        Console.WriteLine($"  [{Stamp()}] {mark} " +
+                          $"{Paint(PadLeft("#" + e.NodeId, ipWidth), Sgr.Grey)} " +
+                          $"{Paint(PadRight(e.Alias, whoWidth), Sgr.Magenta)} " +
+                          $"{Paint(e.ViaText, Sgr.Dim)}");
+    };
 
     Console.WriteLine();
-    Console.WriteLine("RvpnKit 实时监控");
-    Console.WriteLine(new string('─', 74));
+    Console.WriteLine("  " + Paint("图例", Sgr.Bold) + "  " +
+                      Paint("＋ 上线", Sgr.Green) + "   " +
+                      Paint("－ 下线", Sgr.Red) + "   " +
+                      Paint("◆ 节点活动", Sgr.Cyan));
+    Console.WriteLine("  " + Paint("Ctrl+C 退出", Sgr.Grey));
+    Console.WriteLine();
 
     using var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-    await monitor.RunAsync(Console.WriteLine, cts.Token);
+    await monitor.RunAsync(line => Console.WriteLine("  " + Paint(line, Sgr.Dim)), cts.Token);
     return 0;
 }
 
@@ -415,30 +454,41 @@ static List<string> ReadTail(string path, long from, long to)
 var localIp = PeerTable.LocalVirtualAddress();
 bool adapterUp = PeerTable.IsAdapterUp();
 
-Console.WriteLine();
-Console.WriteLine("【网络状态】");
-Console.WriteLine($"  虚拟网卡   : Radmin VPN —— {(adapterUp ? "已启用 (Up)" : "已禁用/未连接")}");
-Console.WriteLine($"  本机虚拟 IP: {localIp?.ToString() ?? "（未分配）"}");
+Ui.Section("网络状态");
+Ui.KeyValue("虚拟网卡", "Radmin VPN", Sgr.Cyan);
+Ui.KeyValue("链路状态",
+    adapterUp ? "● 已启用 (Up)" : "○ 已禁用 / 未连接",
+    adapterUp ? Sgr.Green : Sgr.Red);
+Ui.KeyValue("本机虚拟 IP",
+    localIp?.ToString() ?? "（未分配）",
+    localIp is null ? Sgr.Red : Sgr.Bold + Sgr.Cyan);
 
 if (localIp is null)
 {
-    Console.WriteLine("  ⚠ 未取得虚拟 IP，网络可能已关闭。");
+    Console.WriteLine();
+    Console.WriteLine("    " + Paint("⚠", Sgr.Yellow) +
+                      " 未取得虚拟 IP —— Radmin VPN 网络可能处于关闭状态。");
 }
 
 // ── ② 邻居表：实时对端 ───────────────────────────────────────
 var peers = PeerTable.Read(localIp);
 var resolved = peers.Where(p => p.HasValidMac).ToList();
 
-Console.WriteLine();
-Console.WriteLine("【邻居缓存中的对端】（来自网卡驱动，数据面事实来源）");
-Console.WriteLine($"  条目总数 {peers.Count}，其中已解析出 MAC 的 {resolved.Count}");
+Ui.Section("邻居缓存中的对端",
+           "来自网卡驱动，数据面的事实来源；Radmin 按需建连，无通信的条目会过期");
+Ui.KeyValue("缓存条目", $"{peers.Count}", Sgr.Bold);
+Ui.KeyValue("已解析 MAC", $"{resolved.Count}", Sgr.Green);
+Console.WriteLine($"    {Paint("覆盖比例", Sgr.Grey)}  " +
+                  $"{Ui.Bar(resolved.Count, Math.Max(peers.Count, 1))}  " +
+                  Paint($"{(peers.Count > 0 ? 100.0 * resolved.Count / peers.Count : 0):F0}%", Sgr.Dim));
 
 // ── ③ 服务日志：节点身份 ─────────────────────────────────────
 var logEntries = ServiceLog.Read();
 var byNode = ServiceLog.LatestByNode(logEntries);
-Console.WriteLine();
-Console.WriteLine("【服务日志】");
-Console.WriteLine($"  解析出连接记录 {logEntries.Count:N0} 条，涉及节点 {byNode.Count:N0} 个");
+
+Ui.Section("服务日志", "解析节点身份、连接方式与活动时间");
+Ui.KeyValue("连接记录", $"{logEntries.Count:N0}", Sgr.Bold);
+Ui.KeyValue("涉及节点", $"{byNode.Count:N0}", Sgr.Bold);
 
 // ── ④ 控制管道：读取状态流并解析 IP ↔ 别名 ───────────────────
 var pipeIps = new List<string>();
@@ -452,8 +502,7 @@ var knownAliases = new HashSet<string>(
     byNode.Values.Select(e => e.Alias).Where(a => !string.IsNullOrWhiteSpace(a)),
     StringComparer.Ordinal);
 
-Console.WriteLine();
-Console.WriteLine("【控制管道】");
+Ui.Section("控制管道", "读取状态快照，并把虚拟 IP 与成员身份关联起来");
 try
 {
     using var pipe = new RvpnPipe();
@@ -462,8 +511,11 @@ try
     try
     {
         pipe.Connect();
-        Console.WriteLine($"  ✓ 已连接 {RvpnPipe.PipeName}" +
-                          (pipe.IsReadOnly ? "（只读）" : "（可写）"));
+        Console.WriteLine("    " + Paint("✓", Sgr.Green) + " 已连接 " +
+                          Paint(RvpnPipe.PipeName, Sgr.Cyan) +
+                          (pipe.IsReadOnly
+                              ? "  " + Paint("（只读）", Sgr.Grey)
+                              : "  " + Paint("（可写）", Sgr.Green)));
 
         int idle = 0;
         while (true)
@@ -519,110 +571,146 @@ try
     }
     catch (IOException ex)
     {
-        Console.WriteLine($"  ✗ 连接失败：{ex.Message}");
+        Console.WriteLine("    " + Paint("✗", Sgr.Red) + " 连接失败：" + ex.Message);
     }
 
-    Console.WriteLine($"  读到 {pipeBytes:N0} 字节 / {pipeFrames} 帧");
-    Console.WriteLine($"  提取虚拟 IP {pipeIps.Distinct().Count()} 个，" +
-                      $"节点 ID {nodeIds.Distinct().Count()} 个");
+    Ui.KeyValue("读取字节", $"{pipeBytes:N0}  ({Ui.Bytes(pipeBytes)})", Sgr.Bold);
+    Ui.KeyValue("切出帧数", $"{pipeFrames:N0}", Sgr.Bold);
+    Ui.KeyValue("节点 ID", $"{nodeIds.Distinct().Count():N0} 个", Sgr.Bold);
 
     // ── 关键：把虚拟 IP 与节点别名关联起来（即使读取窗口到期也照常执行）
     if (pipeRaw.Count > 0)
     {
         bindings = AliasResolver.Resolve([.. pipeRaw], knownAliases);
-        Console.WriteLine($"  ✓ 建立 IP ↔ 别名 关联 {bindings.Count} 条" +
-                          $"（白名单 {knownAliases.Count:N0} 个别名）");
+        Console.WriteLine();
+        Console.WriteLine("    " + Paint("✓", Sgr.Green) + " 身份关联完成： " +
+                          Paint($"{bindings.Count} 条", Sgr.Bold + Sgr.Magenta) +
+                          Paint($"  （白名单 {knownAliases.Count:N0} 个别名）", Sgr.Grey));
     }
     else
     {
-        Console.WriteLine("  （本窗口未读到数据，跳过身份关联）");
+        Console.WriteLine("    " + Paint("（本窗口未读到数据，跳过身份关联）", Sgr.Grey));
     }
 }
 catch (Exception ex)
 {
-    Console.WriteLine($"  ✗ 管道处理异常：{ex.GetType().Name}: {ex.Message}");
+    Console.WriteLine("    " + Paint("✗", Sgr.Red) +
+                      $" 管道处理异常：{ex.GetType().Name}: {ex.Message}");
 }
 
 // ── ⑤ 汇总：成员列表（IP + 别名 + MAC）──────────────────────
 var aliasByIp = bindings.ToDictionary(b => b.Ip, b => b.Alias, StringComparer.Ordinal);
 
-Console.WriteLine();
-Console.WriteLine(new string('═', 78));
-Console.WriteLine("【成员列表】");
-Console.WriteLine();
-
 if (resolved.Count == 0)
 {
-    Console.WriteLine("  当前没有已解析出的对端。");
-    Console.WriteLine("  （Radmin 按需建连：无通信时邻居条目可能全零/过期）");
+    Ui.Section("成员列表");
+    Console.WriteLine("    " + Paint("当前没有已解析出的对端。", Sgr.Yellow));
+    Console.WriteLine("    " + Paint("Radmin 按需建连：无通信时邻居条目可能全零或过期。", Sgr.Grey));
 }
 else
 {
-    // 有别名关联的对端优先展示，并给出连接方式
+    // 有别名关联的对端优先展示
     var withAlias = resolved
         .Where(p => aliasByIp.ContainsKey(p.Address.ToString()))
         .OrderBy(p => p.Address.ToString(), Comparer<string>.Create(
             (a, b) => string.CompareOrdinal(a.PadLeft(15, '0'), b.PadLeft(15, '0'))))
         .ToList();
 
-    Console.WriteLine($"  {"虚拟 IP",-16} {"别名",-26} {"MAC 地址",-19} 状态");
-    Console.WriteLine($"  {new string('─', 15)} {new string('─', 25)} {new string('─', 18)} {new string('─', 12)}");
+    // 默认只列前 30 行，避免几百行刷屏；--all 显示全部
+    const int pageSize = 30;
+    var shown = showAll ? withAlias : withAlias.Take(pageSize).ToList();
 
-    foreach (var p in withAlias)
+    Ui.Section("成员列表",
+               $"已识别身份 {withAlias.Count} 个 / 对端共 {resolved.Count} 个" +
+               (showAll || withAlias.Count <= pageSize
+                    ? ""
+                    : $"  ·  下面只显示前 {pageSize} 个，用 --all 看全部"));
+
+    var table = new Ui.Table(
+        ["虚拟 IP", "别名", "MAC 地址", "状态"],
+        [
+            s => Paint(s, Sgr.Cyan),
+            s => Paint(s, Sgr.Magenta),
+            s => Paint(s, Sgr.Grey),
+            s => s.Contains("曾有") ? Paint(s, Sgr.Yellow) : Paint(s, Sgr.Green),
+        ]);
+
+    foreach (var p in shown)
     {
-        string alias = aliasByIp[p.Address.ToString()];
-        Console.WriteLine($"  {p.Address,-16} {alias,-26} {p.Mac,-19} {p.StateText}");
+        string ip = p.Address.ToString();
+        table.Add(ip, aliasByIp[ip], p.Mac, p.StateText);
+    }
+
+    table.Render();
+
+    if (!showAll && withAlias.Count > pageSize)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"    {Paint($"… 还有 {withAlias.Count - pageSize} 个已识别成员未显示", Sgr.Grey)}");
     }
 
     var noAlias = resolved.Count - withAlias.Count;
-    if (noAlias > 0)
-    {
-        Console.WriteLine();
-        Console.WriteLine($"  另有 {noAlias} 个对端只有 IP/MAC、未关联到别名" +
-                          $"（多为历史缓存条目，当前无活跃会话）");
-    }
-
     Console.WriteLine();
-    Console.WriteLine($"  合计 {resolved.Count} 个对端，其中 {withAlias.Count} 个已识别身份");
+    Console.WriteLine($"    {Paint("身份覆盖率", Sgr.Grey)}  " +
+                      $"{Ui.Bar(withAlias.Count, resolved.Count)}  " +
+                      Paint($"{withAlias.Count}/{resolved.Count}", Sgr.Bold));
+    if (noAlias > 0)
+        Console.WriteLine($"    {Paint($"另有 {noAlias} 个对端只有 IP/MAC（多为历史缓存，当前无会话）", Sgr.Grey)}");
 }
 
 // ── ⑥ 已知节点的身份信息（来自日志）──────────────────────────
-Console.WriteLine();
-Console.WriteLine("【已知节点身份】（来自服务日志，按最近活动排序）");
-Console.WriteLine();
 var top = byNode.Values
     .OrderByDescending(e => e.Timestamp)
     .Take(20)
     .ToList();
 
-Console.WriteLine($"  {"节点 ID",-12} {"最近活动",-22} {"连接方式",-26} 别名");
-Console.WriteLine($"  {new string('─', 11)} {new string('─', 21)} {new string('─', 25)} {new string('─', 24)}");
+Ui.Section("最近活跃的节点", $"共 {byNode.Count:N0} 个已知节点，此处显示最近 {top.Count} 个");
+
+var nodeTable = new Ui.Table(
+    ["节点 ID", "最近活动", "连接方式", "别名"],
+    [
+        s => Paint(s, Sgr.Grey),
+        s => Paint(s, Sgr.Dim),
+        s => s.Contains("UDP") ? Paint(s, Sgr.Green)
+           : s.Contains("TCP 直连") ? Paint(s, Sgr.Cyan)
+           : s.Contains("中继") ? Paint(s, Sgr.Yellow)
+           : Paint(s, Sgr.Grey),
+        s => Paint(s, Sgr.Magenta),
+    ]);
 
 foreach (var e in top)
 {
-    string when = e.Timestamp == DateTime.MinValue ? "—" : e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
-    Console.WriteLine($"  {e.NodeId,-12} {when,-22} {e.ViaText,-26} {e.Alias}");
+    string when = e.Timestamp == DateTime.MinValue
+        ? "—"
+        : e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
+    nodeTable.Add(e.NodeId.ToString(), when, e.ViaText, e.Alias);
 }
 
-Console.WriteLine();
-Console.WriteLine($"  合计 {byNode.Count:N0} 个已知节点，此处显示最近活跃的 {top.Count} 个");
+nodeTable.Render();
 
-// ── ⑦ 数据源说明 ─────────────────────────────────────────────
+// ── ⑦ 数据源与限制说明 ───────────────────────────────────────
+Ui.Section("数据源说明");
+
+var sourceTable = new Ui.Table(["数据源", "提供的内容", "可靠性"]);
+sourceTable.Add("网卡邻居表", "对端虚拟 IP + MAC + 可达状态", "高");
+sourceTable.Add("服务日志", "节点 ID + 别名 + 连接方式 + 时间", "高");
+sourceTable.Add("控制管道", "状态快照 + 增量事件（用于关联身份）", "高");
+sourceTable.Render();
+
 Console.WriteLine();
-Console.WriteLine(new string('═', 78));
-Console.WriteLine("【数据源与限制】");
-Console.WriteLine("  ✓ 网卡邻居表 : 实时对端 IP + MAC + 可达状态");
-Console.WriteLine("  ✓ 服务日志   : 节点 ID + 别名 + 连接方式（含精确时间）");
-Console.WriteLine("  ✓ 控制管道   : 状态快照 + 增量事件；用于把 IP 与别名关联");
+Console.WriteLine("    " + Paint("IP ↔ 别名 关联方法", Sgr.Bold));
+Console.WriteLine("    " + Paint("· 虚拟 IP 在快照里以 4 字节原始形式出现", Sgr.Grey));
+Console.WriteLine("    " + Paint("· 别名以 UTF-16LE 出现，起始偏移可能是奇数", Sgr.Grey));
+Console.WriteLine("    " + Paint("· 以服务日志的已知别名作白名单精确匹配，再按邻近性配对", Sgr.Grey));
+Console.WriteLine("    " + Paint("· 双向去重，保证严格一对一", Sgr.Grey));
+
 Console.WriteLine();
-Console.WriteLine("  IP ↔ 别名 关联方法：");
-Console.WriteLine("    管道快照里每个节点的虚拟 IP 以 4 字节原始形式出现，");
-Console.WriteLine("    别名以 UTF-16LE 出现（起始偏移可能是奇数）。");
-Console.WriteLine("    以服务日志的已知别名作为白名单做精确匹配，再按邻近性配对，");
-Console.WriteLine("    可剔除二进制块误解码产生的假别名。");
+Console.WriteLine("    " + Paint("⚠ 未实现：命令下发（加入网络 / 启用禁用 / 踢人）", Sgr.Yellow));
+Console.WriteLine("    " + Paint("服务对非法报文静默丢弃且不记日志，命令格式仍需完成逆向。", Sgr.Grey));
+Console.WriteLine("    " + Paint("详见 docs/OPEN_ISSUE_commands.md", Sgr.Grey));
 Console.WriteLine();
-Console.WriteLine("  ⚠ 命令下发（加入网络 / 启用禁用 / 踢人）尚未实现：");
-Console.WriteLine("     服务对非法报文静默丢弃且不记日志，命令格式仍需完成逆向。");
-Console.WriteLine("     详见 docs/OPEN_ISSUE_commands.md");
+Console.WriteLine("    " + Paint($"提示：使用 --json / --list 可获得无装饰的机器可读输出；" +
+                                    "--no-color 关闭配色", Sgr.Grey));
+Console.WriteLine();
 
 return 0;

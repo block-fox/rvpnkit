@@ -42,15 +42,27 @@ public static class ServiceLog
         /// <summary>失败原因（成功时为空）</summary>
         public string Error { get; init; } = "";
 
-        /// <summary>连接方式的通俗说明</summary>
-        public string ViaText => Via switch
+        /// <summary>连接方式的通俗说明。</summary>
+        public string ViaText
         {
-            var v when v.StartsWith("UDP", StringComparison.OrdinalIgnoreCase) => "UDP 直连（打洞成功，最快）",
-            var v when v.StartsWith("TcpRelay", StringComparison.OrdinalIgnoreCase) => "中继转发（较慢）",
-            var v when v.StartsWith("TCP", StringComparison.OrdinalIgnoreCase) => "TCP 直连",
-            "" => "—",
-            _ => Via,
-        };
+            get
+            {
+                // 失败的记录没有 Via 字段，直接说明比显示「—」更有信息量
+                if (!Connected) return "未连接（离线）";
+
+                return Via switch
+                {
+                    var v when v.StartsWith("UDP", StringComparison.OrdinalIgnoreCase)
+                        => "UDP 直连（打洞成功，最快）",
+                    var v when v.StartsWith("TcpRelay", StringComparison.OrdinalIgnoreCase)
+                        => "中继转发（较慢）",
+                    var v when v.StartsWith("TCP", StringComparison.OrdinalIgnoreCase)
+                        => "TCP 直连",
+                    "" => "已连接（方式未记录）",
+                    _ => Via,
+                };
+            }
+        }
 
         /// <inheritdoc/>
         public override string ToString() =>

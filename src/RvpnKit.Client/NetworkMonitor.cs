@@ -70,6 +70,9 @@ public sealed class NetworkMonitor
     ///
     /// <para>否则启动瞬间会把所有历史对端都报成"刚刚上线"，产生大量噪声。
     /// 只有基线之后出现的差异才是真正的变化。</para>
+    ///
+    /// <para>基线必须覆盖<b>全部日志</b>（而不只是最新那个文件），否则
+    /// 早期日志里的节点会在第一次轮询时被当成"新节点"重复上报。</para>
     /// </summary>
     public void EstablishBaseline()
     {
@@ -77,7 +80,7 @@ public sealed class NetworkMonitor
         foreach (var p in PeerTable.Read(localIp).Where(p => p.HasValidMac))
             _known[p.Address.ToString()] = p;
 
-        foreach (var (id, e) in ServiceLog.LatestByNode(ServiceLog.Read(maxFiles: 1)))
+        foreach (var (id, e) in ServiceLog.LatestByNode(ServiceLog.Read()))
             _nodeCache[id] = e;
 
         _lastLogScan = DateTime.UtcNow;
@@ -120,22 +123,30 @@ public sealed class NetworkMonitor
         }
 
         // ── 服务日志：滚动扫描新出现的节点
+        //
+        // 关键：必须先按节点 ID 归并成「每个节点最近一条」，再去比较。
+        // 直接遍历原始行会为同一节点产生多条事件（同一节点可能有连接成功、
+        // 失败、重连等多条记录），表现为同一行反复刷屏。
         var cutoff = DateTime.Now.AddMinutes(-3);
         if ((DateTime.UtcNow - _lastLogScan).TotalSeconds > 10)
         {
             _lastLogScan = DateTime.UtcNow;
-            var entries = ServiceLog.Read(maxFiles: 1);
-            foreach (var e in entries.Where(x => x.Timestamp >= cutoff))
+
+            var recent = ServiceLog.LatestByNode(
+                ServiceLog.Read(maxFiles: 1).Where(x => x.Timestamp >= cutoff));
+
+            foreach (var (id, e) in recent)
             {
-                if (!_nodeCache.ContainsKey(e.NodeId))
+                // 只有真正的新节点，或连接方式发生了变化，才算"活动"
+                if (!_nodeCache.TryGetValue(id, out var prev))
                 {
-                    _nodeCache[e.NodeId] = e;
+                    _nodeCache[id] = e;
                     NodeSeen?.Invoke(e);
                     changes++;
                 }
-                else if (_nodeCache[e.NodeId].Via != e.Via)
+                else if (prev.Via != e.Via || prev.Timestamp != e.Timestamp)
                 {
-                    _nodeCache[e.NodeId] = e;
+                    _nodeCache[id] = e;
                     NodeSeen?.Invoke(e);
                     changes++;
                 }
