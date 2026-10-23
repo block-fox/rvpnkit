@@ -60,18 +60,37 @@ static async Task<int> MonitorAsync()
 
     string Stamp() => DateTime.Now.ToString("HH:mm:ss");
 
+    // 先解析一次「IP → 别名」，这样事件里能直接显示是谁
+    Console.WriteLine("正在解析成员身份…");
+    var byNode = ServiceLog.LatestByNode(ServiceLog.Read());
+    var known = new HashSet<string>(
+        byNode.Values.Select(e => e.Alias).Where(a => !string.IsNullOrWhiteSpace(a)),
+        StringComparer.Ordinal);
+    var (bindings, _, _) = await CollectBindingsAsync(known, TimeSpan.FromSeconds(6));
+    monitor.SetAliases(bindings);
+    Console.WriteLine($"已识别 {bindings.Count} 个成员身份。");
+
+    string Who(string ip)
+    {
+        string? alias = monitor.AliasOf(ip);
+        return alias is null ? "（未知）" : alias;
+    }
+
     monitor.PeerAppeared += p =>
-        Console.WriteLine($"[{Stamp()}] ＋ 对端接入  {p.Address,-16} {p.Mac}");
+        Console.WriteLine($"[{Stamp()}] ＋ 上线  {p.Address,-16} {Who(p.Address.ToString()),-24} " +
+                          $"{p.Mac}");
 
     monitor.PeerDisappeared += p =>
-        Console.WriteLine($"[{Stamp()}] － 对端离开  {p.Address,-16} {p.Mac}");
+        Console.WriteLine($"[{Stamp()}] － 下线  {p.Address,-16} {Who(p.Address.ToString()),-24} " +
+                          $"{p.Mac}");
 
     monitor.NodeSeen += e =>
-        Console.WriteLine($"[{Stamp()}] ● 节点活动  #{e.NodeId} {e.Alias} " +
+        Console.WriteLine($"[{Stamp()}] ● 活动  #{e.NodeId,-11} {e.Alias,-24} " +
                           $"（{e.ViaText}）");
 
+    Console.WriteLine();
     Console.WriteLine("RvpnKit 实时监控");
-    Console.WriteLine(new string('─', 70));
+    Console.WriteLine(new string('─', 74));
 
     using var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };

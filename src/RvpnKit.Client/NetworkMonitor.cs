@@ -22,6 +22,7 @@ public sealed class NetworkMonitor
     private readonly TimeSpan _interval;
     private readonly Dictionary<string, PeerTable.Peer> _known = new();
     private readonly Dictionary<ulong, ServiceLog.Entry> _nodeCache = new();
+    private Dictionary<string, string> _aliasByIp = new(StringComparer.Ordinal);
     private DateTime _lastLogScan = DateTime.MinValue;
 
     /// <summary>创建监控器。</summary>
@@ -30,6 +31,21 @@ public sealed class NetworkMonitor
     {
         _interval = interval ?? TimeSpan.FromSeconds(2);
     }
+
+    /// <summary>
+    /// 注入「虚拟 IP → 别名」映射，用于在上线/下线事件里显示成员身份。
+    /// 由调用方通过 <see cref="AliasResolver"/> 预先算好。
+    /// </summary>
+    public void SetAliases(IEnumerable<AliasResolver.Binding> bindings)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var b in bindings)
+            map[b.Ip] = b.Alias;
+        _aliasByIp = map;
+    }
+
+    /// <summary>查询某个虚拟 IP 对应的别名；未知时返回 null。</summary>
+    public string? AliasOf(string ip) => _aliasByIp.GetValueOrDefault(ip);
 
     /// <summary>对端上线事件。</summary>
     public event Action<PeerTable.Peer>? PeerAppeared;
