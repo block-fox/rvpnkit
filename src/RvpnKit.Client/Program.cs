@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using RvpnKit.Client;
 using RvpnKit.Protocol;
 
@@ -80,12 +80,95 @@ static async Task<int> MonitorAsync()
     return 0;
 }
 
+/// <summary>
+/// 抓取控制管道状态流并解析 IP ↔ 别名 关联。
+///
+/// <para>这是 <c>--json</c>、<c>--list</c> 与默认报告共用的采集逻辑，
+/// 避免三处各写一遍。</para>
+/// </summary>
+/// <param name="knownAliases">别名白名单（来自服务日志）</param>
+/// <param name="window">读取窗口；快照约 370 KB，2 秒内可读完</param>
+static async Task<(List<AliasResolver.Binding> Bindings, int Bytes, int Frames)>
+    CollectBindingsAsync(IReadOnlySet<string> knownAliases, TimeSpan window)
+{
+    var raw = new List<byte>(400_000);
+    int frames = 0;
+
+    using var pipe = new RvpnPipe();
+    using var cts = new CancellationTokenSource(window);
+
+    try
+    {
+        pipe.Connect();
+    }
+    catch (IOException)
+    {
+        return ([], 0, 0);
+    }
+
+    try
+    {
+        int idle = 0;
+        while (true)
+        {
+            byte[] chunk;
+            try
+            {
+                chunk = await pipe.ReadChunkAsync(TimeSpan.FromMilliseconds(400), cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            if (chunk.Length > 0) raw.AddRange(chunk);
+
+            if (chunk.Length == 0)
+            {
+                if (++idle >= 4 && pipe.PendingBytes == 0) break;
+            }
+            else idle = 0;
+
+            while (true)
+            {
+                try
+                {
+                    if (!pipe.TryTakeFrame(out _)) break;
+                    frames++;
+                }
+                catch (InvalidDataException)
+                {
+                    pipe.ResetBuffer();
+                    break;
+                }
+            }
+
+            if (pipe.ReaderCompleted) break;
+        }
+    }
+    catch (IOException) { /* 读取中断，用已有数据 */ }
+
+    var bindings = raw.Count > 0
+        ? AliasResolver.Resolve([.. raw], knownAliases)
+        : [];
+
+    return (bindings, raw.Count, frames);
+}
+
 /// <summary>输出 JSON，便于脚本与其它程序消费。</summary>
 static async Task<int> JsonAsync()
 {
     var localIp = PeerTable.LocalVirtualAddress();
     var peers = PeerTable.Read(localIp);
     var byNode = ServiceLog.LatestByNode(ServiceLog.Read());
+
+    var known = new HashSet<string>(
+        byNode.Values.Select(e => e.Alias).Where(a => !string.IsNullOrWhiteSpace(a)),
+        StringComparer.Ordinal);
+
+    var (bindings, pipeBytes, pipeFrames) =
+        await CollectBindingsAsync(known, TimeSpan.FromSeconds(6));
+    var aliasByIp = bindings.ToDictionary(b => b.Ip, b => b.Alias, StringComparer.Ordinal);
 
     var doc = new
     {
@@ -97,12 +180,15 @@ static async Task<int> JsonAsync()
         },
         peers = peers
             .Where(p => p.HasValidMac)
-            .OrderBy(p => p.Address.GetAddressBytes()[3])
+            .OrderBy(p => p.Address.ToString(), Comparer<string>.Create(
+                (a, b) => string.CompareOrdinal(a.PadLeft(15, '0'), b.PadLeft(15, '0'))))
             .Select(p => new
             {
                 ip = p.Address.ToString(),
                 mac = p.Mac,
                 state = p.StateText,
+                // 已能关联到别名时给出身份；否则为 null
+                alias = aliasByIp.GetValueOrDefault(p.Address.ToString()),
             })
             .ToArray(),
         nodes = byNode.Values
@@ -124,6 +210,9 @@ static async Task<int> JsonAsync()
             peerCount = peers.Count,
             peerResolved = peers.Count(p => p.HasValidMac),
             knownNodes = byNode.Count,
+            identifiedPeers = bindings.Count,
+            pipeBytes,
+            pipeFrames,
         },
     };
 
@@ -143,13 +232,26 @@ static async Task<int> ListAsync()
     var peers = PeerTable.Read(localIp);
     var byNode = ServiceLog.LatestByNode(ServiceLog.Read());
 
+    var known = new HashSet<string>(
+        byNode.Values.Select(e => e.Alias).Where(a => !string.IsNullOrWhiteSpace(a)),
+        StringComparer.Ordinal);
+
+    var (bindings, _, _) = await CollectBindingsAsync(known, TimeSpan.FromSeconds(6));
+    var aliasByIp = bindings.ToDictionary(b => b.Ip, b => b.Alias, StringComparer.Ordinal);
+
     Console.WriteLine($"# 本机虚拟 IP: {localIp?.ToString() ?? "(无)"}");
-    Console.WriteLine($"# 对端 {peers.Count(p => p.HasValidMac)} 个，已知节点 {byNode.Count} 个");
+    Console.WriteLine($"# 对端 {peers.Count(p => p.HasValidMac)} 个，" +
+                      $"已知节点 {byNode.Count} 个，" +
+                      $"已识别身份 {bindings.Count} 个");
     Console.WriteLine();
-    Console.WriteLine("# 邻居表对端（虚拟 IP / MAC）");
+    Console.WriteLine("# 对端（虚拟 IP / 别名 / MAC / 状态）");
     foreach (var p in peers.Where(p => p.HasValidMac)
-                           .OrderBy(p => p.Address.GetAddressBytes()[3]))
-        Console.WriteLine($"{p.Address}\t{p.Mac}");
+                           .OrderBy(p => p.Address.ToString(), Comparer<string>.Create(
+                               (a, b) => string.CompareOrdinal(a.PadLeft(15, '0'), b.PadLeft(15, '0')))))
+    {
+        string alias = aliasByIp.GetValueOrDefault(p.Address.ToString()) ?? "-";
+        Console.WriteLine($"{p.Address}\t{alias}\t{p.Mac}\t{p.StateText}");
+    }
 
     Console.WriteLine();
     Console.WriteLine("# 已知节点（节点ID / 别名 / 连接方式 / 最近活动）");
@@ -157,7 +259,6 @@ static async Task<int> ListAsync()
         Console.WriteLine($"{e.NodeId}\t{e.Alias}\t{e.ViaText}\t" +
                           $"{(e.Timestamp == DateTime.MinValue ? "—" : e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"))}");
 
-    await Task.CompletedTask;
     return 0;
 }
 
@@ -320,32 +421,50 @@ Console.WriteLine();
 Console.WriteLine("【服务日志】");
 Console.WriteLine($"  解析出连接记录 {logEntries.Count:N0} 条，涉及节点 {byNode.Count:N0} 个");
 
-// ── ④ 控制管道：虚拟 IP 表 ───────────────────────────────────
+// ── ④ 控制管道：读取状态流并解析 IP ↔ 别名 ───────────────────
 var pipeIps = new List<string>();
 var nodeIds = new List<ulong>();
+var pipeRaw = new List<byte>(400_000);
 int pipeBytes = 0, pipeFrames = 0;
+List<AliasResolver.Binding> bindings = [];
+
+// 已知别名白名单：用于剔除由二进制块误解码产生的假别名
+var knownAliases = new HashSet<string>(
+    byNode.Values.Select(e => e.Alias).Where(a => !string.IsNullOrWhiteSpace(a)),
+    StringComparer.Ordinal);
 
 Console.WriteLine();
 Console.WriteLine("【控制管道】");
 try
 {
     using var pipe = new RvpnPipe();
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
     try
     {
         pipe.Connect();
-        Console.WriteLine($"  ✓ 已连接 {RvpnPipe.PipeName}（只读）");
+        Console.WriteLine($"  ✓ 已连接 {RvpnPipe.PipeName}" +
+                          (pipe.IsReadOnly ? "（只读）" : "（可写）"));
 
         int idle = 0;
         while (true)
         {
-            var chunk = await pipe.ReadChunkAsync(TimeSpan.FromMilliseconds(500), cts.Token);
+            byte[] chunk;
+            try
+            {
+                chunk = await pipe.ReadChunkAsync(TimeSpan.FromMilliseconds(500), cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;   // 窗口到期：用已收集的数据继续
+            }
+
             pipeBytes += chunk.Length;
+            if (chunk.Length > 0) pipeRaw.AddRange(chunk);
 
             if (chunk.Length == 0)
             {
-                if (++idle >= 3 && pipe.PendingBytes == 0) break;
+                if (++idle >= 4 && pipe.PendingBytes == 0) break;
             }
             else idle = 0;
 
@@ -378,19 +497,36 @@ try
 
             if (pipe.ReaderCompleted) break;
         }
-
-        Console.WriteLine($"  读到 {pipeBytes:N0} 字节 / {pipeFrames} 帧");
-        Console.WriteLine($"  提取虚拟 IP {pipeIps.Distinct().Count()} 个，" +
-                          $"节点 ID {nodeIds.Distinct().Count()} 个");
     }
-    catch (OperationCanceledException) { Console.WriteLine("  （读取窗口结束）"); }
+    catch (IOException ex)
+    {
+        Console.WriteLine($"  ✗ 连接失败：{ex.Message}");
+    }
+
+    Console.WriteLine($"  读到 {pipeBytes:N0} 字节 / {pipeFrames} 帧");
+    Console.WriteLine($"  提取虚拟 IP {pipeIps.Distinct().Count()} 个，" +
+                      $"节点 ID {nodeIds.Distinct().Count()} 个");
+
+    // ── 关键：把虚拟 IP 与节点别名关联起来（即使读取窗口到期也照常执行）
+    if (pipeRaw.Count > 0)
+    {
+        bindings = AliasResolver.Resolve([.. pipeRaw], knownAliases);
+        Console.WriteLine($"  ✓ 建立 IP ↔ 别名 关联 {bindings.Count} 条" +
+                          $"（白名单 {knownAliases.Count:N0} 个别名）");
+    }
+    else
+    {
+        Console.WriteLine("  （本窗口未读到数据，跳过身份关联）");
+    }
 }
-catch (IOException ex)
+catch (Exception ex)
 {
-    Console.WriteLine($"  ✗ 连接失败：{ex.Message}");
+    Console.WriteLine($"  ✗ 管道处理异常：{ex.GetType().Name}: {ex.Message}");
 }
 
-// ── ⑤ 汇总：成员列表 ─────────────────────────────────────────
+// ── ⑤ 汇总：成员列表（IP + 别名 + MAC）──────────────────────
+var aliasByIp = bindings.ToDictionary(b => b.Ip, b => b.Alias, StringComparer.Ordinal);
+
 Console.WriteLine();
 Console.WriteLine(new string('═', 78));
 Console.WriteLine("【成员列表】");
@@ -403,11 +539,32 @@ if (resolved.Count == 0)
 }
 else
 {
-    Console.WriteLine($"  {"虚拟 IP",-16} {"MAC 地址",-19} 状态");
-    Console.WriteLine($"  {new string('─', 15)} {new string('─', 18)} {new string('─', 20)}");
+    // 有别名关联的对端优先展示，并给出连接方式
+    var withAlias = resolved
+        .Where(p => aliasByIp.ContainsKey(p.Address.ToString()))
+        .OrderBy(p => p.Address.ToString(), Comparer<string>.Create(
+            (a, b) => string.CompareOrdinal(a.PadLeft(15, '0'), b.PadLeft(15, '0'))))
+        .ToList();
 
-    foreach (var p in resolved.OrderBy(p => p.Address.GetAddressBytes()[3]))
-        Console.WriteLine($"  {p.Address,-16} {p.Mac,-19} {p.StateText}");
+    Console.WriteLine($"  {"虚拟 IP",-16} {"别名",-26} {"MAC 地址",-19} 状态");
+    Console.WriteLine($"  {new string('─', 15)} {new string('─', 25)} {new string('─', 18)} {new string('─', 12)}");
+
+    foreach (var p in withAlias)
+    {
+        string alias = aliasByIp[p.Address.ToString()];
+        Console.WriteLine($"  {p.Address,-16} {alias,-26} {p.Mac,-19} {p.StateText}");
+    }
+
+    var noAlias = resolved.Count - withAlias.Count;
+    if (noAlias > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"  另有 {noAlias} 个对端只有 IP/MAC、未关联到别名" +
+                          $"（多为历史缓存条目，当前无活跃会话）");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"  合计 {resolved.Count} 个对端，其中 {withAlias.Count} 个已识别身份");
 }
 
 // ── ⑥ 已知节点的身份信息（来自日志）──────────────────────────
@@ -435,12 +592,18 @@ Console.WriteLine($"  合计 {byNode.Count:N0} 个已知节点，此处显示最
 Console.WriteLine();
 Console.WriteLine(new string('═', 78));
 Console.WriteLine("【数据源与限制】");
-Console.WriteLine("  ✓ 网卡邻居表 : 实时对端 IP + MAC + 可达状态（可靠）");
-Console.WriteLine("  ✓ 服务日志   : 节点 ID + 别名 + 连接方式（可靠，含时间）");
-Console.WriteLine("  ⚠ 控制管道   : 已能连接并读到状态流，但容器层格式尚未完全对齐，");
-Console.WriteLine("                 因此暂未用于成员身份关联");
+Console.WriteLine("  ✓ 网卡邻居表 : 实时对端 IP + MAC + 可达状态");
+Console.WriteLine("  ✓ 服务日志   : 节点 ID + 别名 + 连接方式（含精确时间）");
+Console.WriteLine("  ✓ 控制管道   : 状态快照 + 增量事件；用于把 IP 与别名关联");
 Console.WriteLine();
-Console.WriteLine("  待完成：把邻居表的 IP 与日志的别名通过管道字段关联起来，");
-Console.WriteLine("          即可得到「IP ←→ 别名 ←→ 连接方式」的完整成员视图。");
+Console.WriteLine("  IP ↔ 别名 关联方法：");
+Console.WriteLine("    管道快照里每个节点的虚拟 IP 以 4 字节原始形式出现，");
+Console.WriteLine("    别名以 UTF-16LE 出现（起始偏移可能是奇数）。");
+Console.WriteLine("    以服务日志的已知别名作为白名单做精确匹配，再按邻近性配对，");
+Console.WriteLine("    可剔除二进制块误解码产生的假别名。");
+Console.WriteLine();
+Console.WriteLine("  ⚠ 命令下发（加入网络 / 启用禁用 / 踢人）尚未实现：");
+Console.WriteLine("     服务对非法报文静默丢弃且不记日志，命令格式仍需完成逆向。");
+Console.WriteLine("     详见 docs/OPEN_ISSUE_commands.md");
 
 return 0;
