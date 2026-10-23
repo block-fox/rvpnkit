@@ -110,9 +110,19 @@ static BOOL is_pipe(HANDLE h)
 {
     LONG n = g_pipeCount, i;
     if (!h || h == INVALID_HANDLE_VALUE) return FALSE;
+
+    /* 先看是不是我们见过打开动作的句柄 */
     for (i = 0; i < n; i++)
         if (g_pipes[i] == h) return TRUE;
-    return FALSE;
+
+    /*
+     * 关键补充：运行中注入时，目标进程往往**早就连上了管道**，
+     * 我们根本没见到它的 CreateFileW。此时仅靠 g_pipes 判断会永远返回
+     * FALSE，写入一条都抓不到（本项目实际踩过这个坑）。
+     * 因此退回按句柄类型判断：命名管道一律视为候选。
+     * 日志文件本身是磁盘句柄（FILE_TYPE_DISK），不会被误判、不会自我递归。
+     */
+    return GetFileType(h) == FILE_TYPE_PIPE;
 }
 
 /* ------------------------------------------------------------ the hooks */
