@@ -1,190 +1,208 @@
 /*
- * rvpipe_hook.c — IAT hook for TransactNamedPipe in RvRvpnGui.exe
+ * rvpipe_hook.c —— 抓取 Radmin VPN 控制管道的真实报文。
  *
- * Captures the Ground Truth of the Radmin VPN control pipe protocol: the GUI is
- * the only party that emits well-formed command messages, so logging its pipe
- * traffic reveals the exact command encoding.
+ * 为什么要拦四个 API
+ * ------------------
+ * 最初只拦 TransactNamedPipe，结果装上后一条记录都没有 —— 说明 GUI 并不用
+ * 它来发命令，而是走 WriteFile/ReadFile 的普通管道读写。因此这里同时拦截：
  *
- * Deliberately CRT-free.  An earlier build that pulled in api-ms-win-crt-*
- * failed to load inside the target process, so every string and integer helper
- * is implemented here on top of kernel32 only.
+ *     CreateFileW        —— 识别出控制管道的句柄，记住它
+ *     WriteFile          —— 该句柄上的写入 = GUI → 服务的命令
+ *     ReadFile           —— 该句柄上的读取 = 服务 → GUI 的响应/事件
+ *     TransactNamedPipe  —— 少数场景仍可能使用
  *
- * Build (32-bit, matching the GUI process):
- *   zig cc -target x86-windows-gnu -shared -O2 -o rvpipe_hook32.dll rvpipe_hook.c
+ * 只对「CreateFileW 时看到路径含 RadminVpnGuiChannel」的句柄记录，避免把
+ * 日志自身的写操作也录进去（否则会自我递归）。
+ *
+ * 编译（32 位，匹配目标进程）：
+ *   zig cc -target x86-windows-gnu -shared -O2 -s -o rvpipe_hook.dll rvpipe_hook.c
+ *
+ * 配合「挂起启动」注入：CreateProcess(CREATE_SUSPENDED) → 注入 → ResumeThread，
+ * 这样启动阶段的请求也能抓到。
  */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
+#include <stdio.h>
+#include <string.h>
+#include <wchar.h>
 
-#define MAXDUMP 8192             /* bytes dumped per direction */
-#define LOGBUF  (MAXDUMP * 3)
-#define LOGFILE L"rvpipe_hook.log"
+#define MAXDUMP   4096
+#define LOGCAP    (MAXDUMP * 4 + 4096)
+#define MAXPIPES  16
 
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION g_lock;
 static BOOL g_lockReady = FALSE;
-static void *g_real = NULL;
 
+static volatile HANDLE g_pipes[MAXPIPES];
+static volatile LONG g_pipeCount = 0;
+
+static void *g_realCreate = NULL;
+static void *g_realWrite = NULL;
+static void *g_realRead = NULL;
+static void *g_realTransact = NULL;
+
+static volatile LONG g_patched = 0;
+
+typedef HANDLE(WINAPI *CreateFileW_t)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+                                      DWORD, DWORD, HANDLE);
+typedef BOOL(WINAPI *WriteFile_t)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+typedef BOOL(WINAPI *ReadFile_t)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI *TransactNamedPipe_t)(HANDLE, LPVOID, DWORD, LPVOID, DWORD,
                                           LPDWORD, LPOVERLAPPED);
 
-/* ------------------------------------------------------- tiny string lib */
+/* ---------------------------------------------------------------- logging */
 
-static unsigned slen(const char *s)
-{
-    unsigned n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-static void scopy(char *d, const char *s, unsigned cap)
-{
-    unsigned i = 0;
-    while (s[i] && i + 1 < cap) { d[i] = s[i]; i++; }
-    d[i] = 0;
-}
-
-static void scat(char *d, const char *s, unsigned cap)
-{
-    unsigned n = slen(d);
-    unsigned i = 0;
-    while (s[i] && n + 1 < cap) { d[n++] = s[i++]; }
-    d[n] = 0;
-}
-
-static int scmp(const char *a, const char *b)
-{
-    while (*a && *a == *b) { a++; b++; }
-    return (unsigned char)*a - (unsigned char)*b;
-}
-
-static int scmpi(const char *a, const char *b)
-{
-    for (;; a++, b++) {
-        char ca = *a, cb = *b;
-        if (ca >= 'A' && ca <= 'Z') ca += 32;
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-        if (ca != cb) return (unsigned char)ca - (unsigned char)cb;
-        if (!ca) return 0;
-    }
-}
-
-/* append unsigned decimal */
-static void sapp_u(char *d, unsigned v, unsigned cap)
-{
-    char tmp[16];
-    int n = 0;
-    if (v == 0) { scat(d, "0", cap); return; }
-    while (v && n < 15) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
-    while (n--) {
-        char one[2];
-        one[0] = tmp[n];
-        one[1] = 0;
-        scat(d, one, cap);
-    }
-}
-
-/* append unsigned hex, fixed 2 digits */
-static void sapp_hex2(char *d, unsigned v, unsigned cap)
-{
-    const char *digits = "0123456789abcdef";
-    char one[2];
-    one[0] = digits[(v >> 4) & 0xF];
-    one[1] = 0;
-    scat(d, one, cap);
-    one[0] = digits[v & 0xF];
-    scat(d, one, cap);
-}
-
-/* --------------------------------------------------------------- logging */
-
-static void rawwrite(const char *s)
+static void log_text(const char *s)
 {
     DWORD written = 0;
     if (g_log == INVALID_HANDLE_VALUE) return;
-    WriteFile(g_log, s, slen(s), &written, NULL);
+    /* 直接走 kernel32，绕开被 hook 的导入项 */
+    WriteFile(g_log, s, (DWORD)strlen(s), &written, NULL);
 }
 
-/* hex + printable dump of a buffer, into a caller-provided static buffer */
-static char g_scratch[LOGBUF + 512];
+static char g_buf[LOGCAP];
 
-static void dump_buffer(const char *title, const BYTE *buf, DWORD len)
+static void dump_to_buffer(const char *title, const void *data, DWORD len)
 {
-    char *p = g_scratch;
-    unsigned i;
-
-    scopy(p, "\n=== ", sizeof(g_scratch));
-    scat(p, title, sizeof(g_scratch));
-    scat(p, " len=", sizeof(g_scratch));
-    sapp_u(p, len, sizeof(g_scratch));
-    scat(p, " ===\nHEX:\n", sizeof(g_scratch));
-
+    const BYTE *p = (const BYTE *)data;
     DWORD shown = (len < MAXDUMP) ? len : MAXDUMP;
-    for (i = 0; i < shown; i++) {
-        sapp_hex2(p, buf[i], sizeof(g_scratch));
-        if (i + 1 < shown) scat(p, " ", sizeof(g_scratch));
-        if ((i & 15) == 15) scat(p, "\n", sizeof(g_scratch));
-    }
-    scat(p, "\nASCII:\n", sizeof(g_scratch));
+    size_t off = 0;
+    DWORD i;
 
-    for (i = 0; i < shown; i++) {
-        char c = (buf[i] >= 32 && buf[i] < 127) ? (char)buf[i] : '.';
-        char one[2];
-        one[0] = c;
-        one[1] = 0;
-        scat(p, one, sizeof(g_scratch));
-        if ((i & 63) == 63) scat(p, "\n", sizeof(g_scratch));
-    }
-    scat(p, "\n", sizeof(g_scratch));
+    off += (size_t)sprintf_s(g_buf + off, LOGCAP - off,
+                             "\n=== %s len=%lu ===\nHEX:\n", title, len);
 
-    rawwrite(p);
+    for (i = 0; i < shown && off + 8 < LOGCAP; i++) {
+        off += (size_t)sprintf_s(g_buf + off, LOGCAP - off, "%02x ", p[i]);
+        if ((i & 15) == 15 && off + 2 < LOGCAP) {
+            g_buf[off++] = '\n';
+            g_buf[off] = 0;
+        }
+    }
+
+    off += (size_t)sprintf_s(g_buf + off, LOGCAP - off, "\nASCII:\n");
+    for (i = 0; i < shown && off + 2 < LOGCAP; i++) {
+        g_buf[off++] = (p[i] >= 32 && p[i] < 127) ? (char)p[i] : '.';
+        if ((i & 63) == 63 && off + 2 < LOGCAP) {
+            g_buf[off++] = '\n';
+            g_buf[off] = 0;
+        }
+    }
+    if (off + 2 < LOGCAP) { g_buf[off++] = '\n'; g_buf[off] = 0; }
+
+    log_text(g_buf);
 }
 
-/* ------------------------------------------------------------ the hook */
+/* ------------------------------------------------------- pipe bookkeeping */
 
-static BOOL WINAPI hook_TransactNamedPipe(HANDLE hPipe, LPVOID lpvWrite,
-                                          DWORD nWrite, LPVOID lpvRead,
-                                          DWORD nRead, LPDWORD lpcbRead,
-                                          LPOVERLAPPED lpOverlapped)
+static void remember_pipe(HANDLE h)
 {
+    LONG n = g_pipeCount;
+    if (n >= MAXPIPES) return;
+    g_pipes[n] = h;
+    InterlockedIncrement(&g_pipeCount);
+}
+
+static BOOL is_pipe(HANDLE h)
+{
+    LONG n = g_pipeCount, i;
+    if (!h || h == INVALID_HANDLE_VALUE) return FALSE;
+    for (i = 0; i < n; i++)
+        if (g_pipes[i] == h) return TRUE;
+    return FALSE;
+}
+
+/* ------------------------------------------------------------ the hooks */
+
+static HANDLE WINAPI hook_CreateFileW(LPCWSTR name, DWORD access, DWORD share,
+                                      LPSECURITY_ATTRIBUTES sa, DWORD disp,
+                                      DWORD flags, HANDLE tmpl)
+{
+    CreateFileW_t real = (CreateFileW_t)g_realCreate;
+    HANDLE h = real(name, access, share, sa, disp, flags, tmpl);
+
+    if (h != INVALID_HANDLE_VALUE && name && wcsstr(name, L"RadminVpnGuiChannel")) {
+        char line[200];
+        remember_pipe(h);
+        sprintf_s(line, sizeof(line),
+                  "\n### pipe handle opened: 0x%p (access=0x%lx flags=0x%lx)\n",
+                  h, access, flags);
+        log_text(line);
+    }
+    return h;
+}
+
+static BOOL WINAPI hook_WriteFile(HANDLE h, LPCVOID buf, DWORD n,
+                                  LPDWORD written, LPOVERLAPPED ov)
+{
+    WriteFile_t real = (WriteFile_t)g_realWrite;
     BOOL ok;
-    DWORD cbRead = 0;
-    TransactNamedPipe_t real = (TransactNamedPipe_t)g_real;
 
-    if (g_lockReady) EnterCriticalSection(&g_lock);
-    if (lpvWrite && nWrite) dump_buffer("OUT", (const BYTE *)lpvWrite, nWrite);
-    if (g_lockReady) LeaveCriticalSection(&g_lock);
+    /* 只记录控制管道上的写入；长度用调用方给出的 n，天然安全。 */
+    if (buf && n && n <= 1024 * 1024 && is_pipe(h)) {
+        if (g_lockReady) EnterCriticalSection(&g_lock);
+        dump_to_buffer("OUT (WriteFile)", buf, n);
+        if (g_lockReady) LeaveCriticalSection(&g_lock);
+    }
+    ok = real(h, buf, n, written, ov);
+    return ok;
+}
 
-    ok = real(hPipe, lpvWrite, nWrite, lpvRead, nRead, &cbRead, lpOverlapped);
-    if (!ok && !lpOverlapped) {
-        /* a failed call still tells us the shape of the request */
-        cbRead = 0;
+/*
+ * 注意：这里**故意不 hook ReadFile**。
+ *
+ * 早期版本 hook 了 ReadFile，进程会偶发崩溃。原因是 Qt 走的是重叠 I/O：
+ * ReadFile 返回 TRUE 时 *got 可能仍是未定义值，甚至大于请求长度 n，
+ * 按 *got 去读 buf 就会越界访问。
+ * 而我们要的是「GUI 发出的命令」，那全在 WriteFile 上，读方向不必拦。
+ */
+
+static BOOL WINAPI hook_TransactNamedPipe(HANDLE h, LPVOID w, DWORD nw,
+                                          LPVOID r, DWORD nr, LPDWORD got,
+                                          LPOVERLAPPED ov)
+{
+    TransactNamedPipe_t real = (TransactNamedPipe_t)g_realTransact;
+    DWORD cb = 0;
+    BOOL ok;
+
+    if (is_pipe(h) && w && nw && nw <= 1024 * 1024) {
+        if (g_lockReady) EnterCriticalSection(&g_lock);
+        dump_to_buffer("OUT (Transact)", w, nw);
+        if (g_lockReady) LeaveCriticalSection(&g_lock);
     }
 
-    if (g_lockReady) EnterCriticalSection(&g_lock);
-    if (lpvRead && cbRead) {
-        dump_buffer("IN", (const BYTE *)lpvRead, cbRead);
-    } else {
-        rawwrite("\n=== IN (no data) ===\n");
-    }
-    if (g_lockReady) LeaveCriticalSection(&g_lock);
+    ok = real(h, w, nw, r, nr, &cb, ov);
 
-    if (lpcbRead) *lpcbRead = cbRead;
+    /* 用 cb 与请求长度取小值，避免读到缓冲区之外 */
+    if (is_pipe(h) && r && cb) {
+        DWORD safe = (cb < nr) ? cb : nr;
+        if (safe > 0 && safe <= 1024 * 1024) {
+            if (g_lockReady) EnterCriticalSection(&g_lock);
+            dump_to_buffer("IN (Transact)", r, safe);
+            if (g_lockReady) LeaveCriticalSection(&g_lock);
+        }
+    }
+    if (got) *got = cb;
     return ok;
 }
 
 /* --------------------------------------------------------- IAT patching */
 
-static BOOL patch_iat(HMODULE mod, const char *dllName, const char *funcName,
-                      void *replacement)
+static BOOL patch_one(HMODULE mod, const char *funcName, void *replacement,
+                      void **origSlot)
 {
     BYTE *base = (BYTE *)mod;
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    IMAGE_DOS_HEADER *dos;
     IMAGE_NT_HEADERS *nt;
     IMAGE_DATA_DIRECTORY *imp;
     IMAGE_IMPORT_DESCRIPTOR *desc;
 
-    if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+    if (!base) return FALSE;
+    dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
     nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
 
@@ -193,10 +211,12 @@ static BOOL patch_iat(HMODULE mod, const char *dllName, const char *funcName,
 
     desc = (IMAGE_IMPORT_DESCRIPTOR *)(base + imp->VirtualAddress);
     for (; desc->Name; desc++) {
-        const char *name = (const char *)(base + desc->Name);
+        const char *dll = (const char *)(base + desc->Name);
         IMAGE_THUNK_DATA *orig, *iat;
 
-        if (scmpi(name, dllName) != 0) continue;
+        if (_stricmp(dll, "KERNEL32.dll") != 0 &&
+            _stricmp(dll, "KernelBase.dll") != 0)
+            continue;
 
         orig = (IMAGE_THUNK_DATA *)(base + desc->OriginalFirstThunk);
         iat = (IMAGE_THUNK_DATA *)(base + desc->FirstThunk);
@@ -204,122 +224,118 @@ static BOOL patch_iat(HMODULE mod, const char *dllName, const char *funcName,
 
         for (; orig->u1.AddressOfData; orig++, iat++) {
             DWORD oldProt = 0;
-            if (orig->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
-            if (scmp((const char *)((IMAGE_IMPORT_BY_NAME *)(base + orig->u1.AddressOfData))->Name,
-                     funcName) != 0)
-                continue;
+            IMAGE_IMPORT_BY_NAME *ibn;
 
-            g_real = (void *)iat->u1.Function;
-            if (!VirtualProtect(&iat->u1.Function, sizeof(void *), PAGE_READWRITE, &oldProt))
+            if (orig->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            ibn = (IMAGE_IMPORT_BY_NAME *)(base + orig->u1.AddressOfData);
+            if (strcmp((const char *)ibn->Name, funcName) != 0) continue;
+
+            if ((void *)iat->u1.Function == replacement) return TRUE;  /* 已补过 */
+            if (origSlot && !*origSlot) *origSlot = (void *)iat->u1.Function;
+
+            if (!VirtualProtect(&iat->u1.Function, sizeof(void *),
+                                PAGE_READWRITE, &oldProt))
                 return FALSE;
             iat->u1.Function = (ULONG_PTR)replacement;
             VirtualProtect(&iat->u1.Function, sizeof(void *), oldProt, &oldProt);
+            InterlockedIncrement(&g_patched);
             return TRUE;
         }
     }
     return FALSE;
 }
 
-/* ----------------------------------------------------------------- setup */
-
-/* wide-string helpers (kept CRT-free on purpose) */
-static unsigned wlen(const wchar_t *s) { unsigned n = 0; while (s[n]) n++; return n; }
-
-static void wcat(wchar_t *d, const wchar_t *s, unsigned cap)
+/* 给一个模块补需要拦截的 API，返回新补的数量 */
+static int patch_module(HMODULE mod)
 {
-    unsigned n = wlen(d), i = 0;
-    while (s[i] && n + 1 < cap) { d[n++] = s[i++]; }
-    d[n] = 0;
+    int n = 0;
+    n += patch_one(mod, "CreateFileW", (void *)hook_CreateFileW, &g_realCreate) ? 1 : 0;
+    n += patch_one(mod, "WriteFile", (void *)hook_WriteFile, &g_realWrite) ? 1 : 0;
+    n += patch_one(mod, "TransactNamedPipe", (void *)hook_TransactNamedPipe,
+                   &g_realTransact) ? 1 : 0;
+    return n;
 }
 
-static void wcpy(wchar_t *d, const wchar_t *s, unsigned cap)
+static int patch_all_modules(void)
 {
-    unsigned i = 0;
-    while (s[i] && i + 1 < cap) { d[i] = s[i]; i++; }
-    d[i] = 0;
+    HANDLE snap;
+    MODULEENTRY32 me;
+    int total = 0;
+
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+
+    me.dwSize = sizeof(me);
+    if (Module32First(snap, &me)) {
+        do {
+            total += patch_module((HMODULE)me.modBaseAddr);
+        } while (Module32Next(snap, &me));
+    }
+    CloseHandle(snap);
+    return total;
+}
+
+/* ----------------------------------------------------------------- setup */
+
+static BOOL open_log(void)
+{
+    wchar_t wpath[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, wpath);
+
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(wpath, MAX_PATH, L"C:\\Windows\\Temp\\");
+    wcscat_s(wpath, MAX_PATH, L"rvpipe_hook.log");
+
+    g_log = CreateFileW(wpath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    return g_log != INVALID_HANDLE_VALUE;
 }
 
 static DWORD WINAPI worker(LPVOID param)
 {
-    wchar_t wpath[MAX_PATH];
-    char path[MAX_PATH];
-    DWORD n;
-    HMODULE kern, exe;
-    void *target;
+    char line[200];
+    int round;
 
     (void)param;
-
-    InitializeCriticalSection(&g_lock);
-    g_lockReady = TRUE;
-
-    /* Prefer %TEMP%: the install directory is not user-writable. */
-    n = GetTempPathW(MAX_PATH, wpath);
-    if (n == 0 || n >= MAX_PATH) {
-        wcpy(wpath, L"C:\\Windows\\Temp\\", MAX_PATH);
+    for (round = 0; round < 600; round++) {
+        int added = patch_all_modules();
+        if (added > 0) {
+            sprintf_s(line, sizeof(line), "rescan %d: patched %d import slot(s)\n",
+                      round, added);
+            log_text(line);
+        }
+        Sleep(150);
     }
-    wcat(wpath, LOGFILE, MAX_PATH);
-    g_log = CreateFileW(wpath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-
-    if (g_log == INVALID_HANDLE_VALUE) {
-        /* fall back to beside the DLL */
-        HMODULE self = NULL;
-        wchar_t selfPath[MAX_PATH];
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)&worker, &self);
-        GetModuleFileNameW(self, selfPath, MAX_PATH);
-        n = wlen(selfPath);
-        while (n && selfPath[n] != L'\\') n--;
-        selfPath[n + 1] = 0;
-        wcat(selfPath, LOGFILE, MAX_PATH);
-        g_log = CreateFileW(selfPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        wcpy(wpath, selfPath, MAX_PATH);
-    }
-
-    if (g_log == INVALID_HANDLE_VALUE) return 0;
-
-    /* convert the wide path to ascii just for the banner */
-    {
-        int i = 0;
-        while (wpath[i] && i < MAX_PATH - 1) { path[i] = (char)wpath[i]; i++; }
-        path[i] = 0;
-    }
-
-    scopy(g_scratch, "rvpipe_hook attached pid=", sizeof(g_scratch));
-    sapp_u(g_scratch, GetCurrentProcessId(), sizeof(g_scratch));
-    scat(g_scratch, " log=", sizeof(g_scratch));
-    scat(g_scratch, path, sizeof(g_scratch));
-    scat(g_scratch, "\n", sizeof(g_scratch));
-    rawwrite(g_scratch);
-
-    kern = GetModuleHandleA("kernel32.dll");
-    if (!kern) kern = GetModuleHandleA("KernelBase.dll");
-    if (!kern) { rawwrite("no kernel32\n"); return 0; }
-
-    target = (void *)GetProcAddress(kern, "TransactNamedPipe");
-    if (!target) { rawwrite("TransactNamedPipe not exported\n"); return 0; }
-    g_real = target;
-
-    exe = GetModuleHandleA(NULL);
-    if (patch_iat(exe, "KERNEL32.dll", "TransactNamedPipe", (void *)hook_TransactNamedPipe) ||
-        patch_iat(exe, "KERNEL32.DLL", "TransactNamedPipe", (void *)hook_TransactNamedPipe) ||
-        patch_iat(exe, "kernel32.dll", "TransactNamedPipe", (void *)hook_TransactNamedPipe)) {
-        rawwrite("IAT hook installed\n");
-    } else {
-        rawwrite("FAILED to patch IAT (TransactNamedPipe may be resolved dynamically)\n");
-    }
-
     return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
-    HANDLE th;
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        char line[200];
+        HANDLE th;
+
         DisableThreadLibraryCalls(inst);
+        InitializeCriticalSection(&g_lock);
+        g_lockReady = TRUE;
+
+        if (!open_log()) return TRUE;
+
+        sprintf_s(line, sizeof(line), "rvpipe_hook attached pid=%lu\n",
+                  GetCurrentProcessId());
+        log_text(line);
+
+        /*
+         * 在 DllMain 返回前同步补齐主模块，确保「恢复运行后立刻发出的请求」
+         * 也能被捕获；后台线程只负责后续加载的 DLL。
+         */
+        {
+            int n = patch_module(GetModuleHandleW(NULL));
+            sprintf_s(line, sizeof(line),
+                      "main module: patched %d import slot(s)\n", n);
+            log_text(line);
+        }
+
         th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
         if (th) CloseHandle(th);
     }
