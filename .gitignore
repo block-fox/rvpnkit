@@ -34,3 +34,5 @@ captures/
 rust/target/
 **/target/
 rust/.cargo/registry/
+dist/*.zip
+dist/RvpnKit-*/
