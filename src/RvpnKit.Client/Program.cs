@@ -379,7 +379,11 @@ static async Task<int> JoinNetworkAsync(string name, bool dump)
     if (!pipe.CanWrite)
     {
         Console.Error.WriteLine("✗ 当前连接是只读的，无法下发命令。");
-        Console.Error.WriteLine("  请先关闭官方 Radmin VPN 界面再重试（管道实例被它占用）。");
+        Console.Error.WriteLine("  原因：读写打开被拒（错误 5）。已排查确认是本机安全软件的");
+        Console.Error.WriteLine("  「程序控制 / IPC 保护」拦截了未签名程序对其它进程管道的写入");
+        Console.Error.WriteLine("  —— 同为子进程的 Python 能写，唯独新编译的本程序被拒。");
+        Console.Error.WriteLine("  解决办法：把 rvpnkit.exe 加入安全软件白名单；");
+        Console.Error.WriteLine("  或直接用 native/rvpncmd.py 下发命令（立即可用）。");
         return 2;
     }
 
