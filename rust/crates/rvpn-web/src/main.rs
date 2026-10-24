@@ -469,8 +469,16 @@ fn api_join(body: &str) -> (u16, &'static str, Vec<u8>) {
     let Some(name) = body_str(body, "name") else {
         return json_err(400, "缺少 name");
     };
-    match send(Commands::join_network(name.trim(), next_request_id())) {
-        Ok(rid) => json_ok(serde_json::json!({ "requestId": rid, "joined": name })),
+    let password = body_str(body, "password").unwrap_or_default();
+    let frame = if password.is_empty() {
+        Commands::join_network(name.trim(), next_request_id())
+    } else {
+        Commands::join_network_with_password(name.trim(), &password, next_request_id())
+    };
+    match send(frame) {
+        Ok(rid) => json_ok(serde_json::json!({
+            "requestId": rid, "joined": name, "withPassword": !password.is_empty()
+        })),
         Err(e) => json_err(409, e),
     }
 }
@@ -479,17 +487,16 @@ fn api_create(body: &str) -> (u16, &'static str, Vec<u8>) {
     let Some(name) = body_str(body, "name") else {
         return json_err(400, "缺少 name");
     };
-    if let Some(pw) = body_str(body, "password") {
-        if !pw.is_empty() {
-            // 诚实告知：密码字段位置还没解出来
-            return json_err(
-                400,
-                "暂不支持设置密码：抓到的创建请求都是免密码网络，密码字段的位置尚未解出",
-            );
-        }
-    }
-    match send(Commands::create_network(name.trim(), next_request_id(), None)) {
-        Ok(rid) => json_ok(serde_json::json!({ "requestId": rid, "created": name })),
+    let password = body_str(body, "password").unwrap_or_default();
+    let frame = if password.is_empty() {
+        Commands::create_network(name.trim(), next_request_id(), None)
+    } else {
+        Commands::create_network_with_password(name.trim(), &password, next_request_id())
+    };
+    match send(frame) {
+        Ok(rid) => json_ok(serde_json::json!({
+            "requestId": rid, "created": name, "withPassword": !password.is_empty()
+        })),
         Err(e) => json_err(409, e),
     }
 }

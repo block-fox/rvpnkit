@@ -171,6 +171,8 @@ struct App {
     search: String,
     alias_input: String,
     join_input: String,
+    /// 加入 / 创建时用的密码，留空表示免密码网络
+    password_input: String,
     status: String,
     can_write: bool,
     busy: bool,
@@ -256,6 +258,7 @@ impl App {
             search: String::new(),
             alias_input: String::new(),
             join_input: String::new(),
+            password_input: String::new(),
             status: "正在读取状态…".into(),
             can_write: true,
             busy: true,
@@ -888,19 +891,40 @@ impl App {
                     .hint_text("网络名")
                     .desired_width(220.0),
             );
+            let pw = self.password_input.clone();
+            ui.add(
+                egui::TextEdit::singleline(&mut self.password_input)
+                    .hint_text("密码（留空=免密码）")
+                    .password(true)
+                    .desired_width(170.0),
+            );
             if ui.button("加入").clicked() && !self.join_input.trim().is_empty() {
                 let name = self.join_input.trim().to_string();
-                self.queue_send(
-                    Commands::join_network(&name, next_request_id()),
-                    format!("加入 {name}"),
-                );
+                let frame = if pw.is_empty() {
+                    Commands::join_network(&name, next_request_id())
+                } else {
+                    Commands::join_network_with_password(&name, &pw, next_request_id())
+                };
+                let label = if pw.is_empty() {
+                    format!("加入 {name}")
+                } else {
+                    format!("加入 {name}（带密码）")
+                };
+                self.queue_send(frame, label);
             }
             if ui.button("创建").clicked() && !self.join_input.trim().is_empty() {
                 let name = self.join_input.trim().to_string();
-                self.queue_send(
-                    Commands::create_network(&name, next_request_id(), None),
-                    format!("创建 {name}"),
-                );
+                let frame = if pw.is_empty() {
+                    Commands::create_network(&name, next_request_id(), None)
+                } else {
+                    Commands::create_network_with_password(&name, &pw, next_request_id())
+                };
+                let label = if pw.is_empty() {
+                    format!("创建 {name}")
+                } else {
+                    format!("创建 {name}（带密码）")
+                };
+                self.queue_send(frame, label);
             }
         });
         ui.add_space(10.0);
@@ -1537,8 +1561,8 @@ impl App {
             ui.add_space(6.0);
             let items = [
                 (
-                    "创建 / 加入网络设密码",
-                    "抓到的创建与加入请求都是免密码网络；撞过 57 个候选字段号都没命中，密码不在普通字符串字段里。需要一个带密码网络的抓包样本。",
+                    "密码网络",
+                    "已支持。令牌算法逆向自客户端并通过五组抓包样本与活体加入验证；界面里填密码即可加入或创建。",
                 ),
                 (
                     "成员的虚拟 IP / IPv6 / 通道类型",
