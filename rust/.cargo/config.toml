@@ -1,0 +1,13 @@
+# 让 windows-gnu 目标能正常链接。
+#
+# 本机没装 MSVC，所以用 x86_64-pc-windows-gnu 工具链。默认情况下编译
+# proc-macro 依赖（比如 serde_derive）时，rustc 不会自动把 Rust 自带的
+# mingw 库目录传给链接器，于是报一堆：
+#     ld: cannot find -lkernel32 / -lmsvcrt / -lmingwex ...
+# 显式指定 rust-lld 并开启自带 sysroot 链接即可。
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "linker=rust-lld", "-C", "link-self-contained=yes"]
+
+[build]
+# 有依赖时要走代理
+# http_proxy 通过环境变量设置，见 README

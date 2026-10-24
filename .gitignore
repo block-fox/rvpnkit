@@ -1,4 +1,4 @@
-# ── 构建产物 ──
+﻿# ── 构建产物 ──
 bin/
 obj/
 *.user
@@ -27,6 +27,10 @@ recon/*_out.txt
 # ── 运行时 ──
 captures/
 
-# ��ʱ�ύ��Ϣ�ļ�
+# ��ʱ�ύ��Ϣ�ļ�
 .msg.txt
 .git-commit-msg.txt
+
+rust/target/
+**/target/
+rust/.cargo/registry/

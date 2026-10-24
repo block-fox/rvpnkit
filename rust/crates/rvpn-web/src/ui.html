@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RvpnKit · Radmin VPN</title>
+<style>
+  :root{
+    --bg:#12151c; --panel:#1a1e27; --panel2:#151a22; --line:#242b38;
+    --fg:#c8d2e0; --dim:#8b98ab; --accent:#7aa2f7; --good:#9ece6a;
+    --warn:#e0af68; --bad:#f7768e;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    display:grid; grid-template-columns:186px 1fr; grid-template-rows:56px 1fr 30px;
+    grid-template-areas:"side top" "side main" "side status";
+    overflow:hidden;
+  }
+
+  /* ── 左侧分页栏 */
+  aside{
+    grid-area:side; background:var(--panel); border-right:1px solid var(--line);
+    padding:18px 12px; display:flex; flex-direction:column; gap:4px;
+  }
+  .brand{font-size:19px; font-weight:700; color:var(--accent); letter-spacing:.5px}
+  .brand small{display:block; font-size:10.5px; color:var(--dim); font-weight:400; letter-spacing:0}
+  .nav{margin-top:18px; display:flex; flex-direction:column; gap:2px}
+  .nav button{
+    all:unset; cursor:pointer; padding:9px 12px; border-radius:7px;
+    color:var(--dim); font-size:13.5px; display:flex; justify-content:space-between;
+    align-items:center; transition:background .12s,color .12s;
+  }
+  .nav button:hover{background:#20262f; color:var(--fg)}
+  .nav button.on{background:#25304a; color:#fff}
+  .nav .count{font-size:11px; color:var(--dim)}
+  .side-foot{margin-top:auto; font-size:11px; color:var(--dim); line-height:1.7}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+  .dot.ok{background:var(--good)} .dot.ro{background:var(--warn)}
+
+  /* ── 顶栏 */
+  header{
+    grid-area:top; background:var(--panel); border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:10px; padding:0 16px;
+  }
+  .btn{
+    all:unset; cursor:pointer; padding:7px 13px; border-radius:7px;
+    background:#232a36; color:var(--fg); font-size:13px; transition:background .12s;
+  }
+  .btn:hover{background:#2c3546}
+  .btn.primary{background:#2b3f6b; color:#dbe6ff}
+  .btn.primary:hover{background:#34508a}
+  .btn.danger{color:var(--warn)}
+  .power{font-weight:600; display:flex; align-items:center; gap:6px}
+  .power.on{color:var(--good)} .power.off{color:var(--warn)}
+  .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+  .self{font-size:12.5px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+  /* ── 主区 */
+  main{grid-area:main; overflow:auto; padding:18px 20px}
+  .page{display:none} .page.on{display:block}
+  h2{margin:0 0 4px; font-size:17px; font-weight:650}
+  .hint{color:var(--dim); font-size:11.5px; margin-bottom:14px}
+
+  .toolbar{display:flex; gap:8px; align-items:center; margin-bottom:14px; flex-wrap:wrap}
+  input[type=text],input[type=password]{
+    background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+    padding:7px 11px; border-radius:7px; font-size:13px; outline:none; min-width:200px;
+  }
+  input:focus{border-color:#3b5a91}
+
+  /* 表格 */
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  thead th{
+    text-align:left; font-weight:500; color:var(--dim); font-size:11.5px;
+    padding:6px 10px; border-bottom:1px solid var(--line); position:sticky; top:-18px;
+    background:var(--bg); letter-spacing:.3px;
+  }
+  tbody tr{cursor:default}
+  tbody tr:hover{background:#1b212b}
+  tbody tr.sel{background:#243049}
+  tbody td{padding:7px 10px; border-bottom:1px solid #1b202a; white-space:nowrap;
+           overflow:hidden; text-overflow:ellipsis}
+  td.mono{font-family:ui-monospace,Consolas,monospace; font-size:12px; color:var(--accent)}
+  td.ip{font-family:ui-monospace,Consolas,monospace; font-size:12px; color:var(--good)}
+  td.tag{color:var(--dim); font-size:12px}
+  .empty{color:var(--dim); padding:26px 4px; font-size:13px}
+
+  /* 右键菜单 */
+  #menu{
+    position:fixed; z-index:99; background:#1e2430; border:1px solid #2f3949;
+    border-radius:9px; padding:5px; min-width:168px; display:none;
+    box-shadow:0 12px 34px rgba(0,0,0,.55);
+  }
+  #menu .mt{font-size:11px; color:var(--dim); padding:5px 10px 6px; border-bottom:1px solid #2a3240; margin-bottom:4px;
+            max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  #menu button{
+    all:unset; display:block; width:100%; cursor:pointer; padding:7px 11px;
+    border-radius:6px; font-size:13px;
+  }
+  #menu button:hover{background:#2b3546}
+  #menu button.danger{color:var(--warn)}
+  #menu hr{border:0; border-top:1px solid #2a3240; margin:4px 2px}
+
+  /* 状态栏 */
+  footer{
+    grid-area:status; background:var(--panel); border-top:1px solid var(--line);
+    display:flex; align-items:center; padding:0 16px; font-size:11.5px; color:var(--dim);
+    gap:14px;
+  }
+  .toast{position:fixed; right:18px; bottom:44px; background:#232c3d; color:var(--fg);
+         border:1px solid #33405a; border-radius:9px; padding:10px 15px; font-size:13px;
+         opacity:0; transform:translateY(8px); transition:.18s; pointer-events:none; max-width:420px}
+  .toast.show{opacity:1; transform:none}
+  .spin{animation:sp 1s linear infinite; display:inline-block}
+  @keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="brand">RvpnKit<small>Radmin VPN 客户端</small></div>
+  <nav class="nav">
+    <button data-page="networks" class="on">网络 <span class="count" id="cNet"></span></button>
+    <button data-page="members">成员 <span class="count" id="cMem"></span></button>
+    <button data-page="public">公共网络 <span class="count" id="cPub"></span></button>
+    <button data-page="settings">设置</button>
+  </nav>
+  <div class="side-foot">
+    <div id="backend"><span class="dot ok"></span>直连管道</div>
+    <div id="perm" style="margin-top:4px"></div>
+    <div style="margin-top:8px;opacity:.7">右键行可操作</div>
+  </div>
+</aside>
+
+<header>
+  <button class="btn power on" id="powerBtn" title="切换 VPN 总电源">⏻ 已开启</button>
+  <div class="sep"></div>
+  <button class="btn" id="refreshBtn">刷新</button>
+  <div class="sep"></div>
+  <div class="self" id="selfInfo">正在读取…</div>
+  <div style="margin-left:auto"><span id="spinner"></span></div>
+</header>
+
+<main>
+  <!-- 网络 -->
+  <section class="page on" id="page-networks">
+    <h2>网络</h2>
+    <div class="hint">双击进入成员页；右键可启用/禁用/离开/删除/复制 GUID</div>
+    <div class="toolbar">
+      <input type="text" id="joinName" placeholder="网络名">
+      <button class="btn primary" id="joinBtn">加入</button>
+      <button class="btn" id="createBtn">创建</button>
+    </div>
+    <table>
+      <thead><tr><th style="width:52%">网络名</th><th style="width:14%">成员</th><th style="width:34%">GUID</th></tr></thead>
+      <tbody id="netBody"></tbody>
+    </table>
+    <div class="empty" id="netEmpty" style="display:none">暂无网络</div>
+  </section>
+
+  <!-- 成员 -->
+  <section class="page" id="page-members">
+    <h2>成员 <span id="memNetName" style="color:var(--dim);font-size:13px;font-weight:400"></span></h2>
+    <div class="hint">右键成员可踢出 / 授权 / 撤权 / 批准 / 复制节点 ID</div>
+    <table>
+      <thead><tr><th style="width:150px">节点 ID</th><th style="width:44%">别名</th><th>公网 IP</th></tr></thead>
+      <tbody id="memBody"></tbody>
+    </table>
+    <div class="empty" id="memEmpty" style="display:none">请先在「网络」页选中一个网络</div>
+  </section>
+
+  <!-- 公共网络 -->
+  <section class="page" id="page-public">
+    <h2>公共网络</h2>
+    <div class="hint">只显示尚未加入的网络；右键可加入或复制名字</div>
+    <div class="toolbar">
+      <input type="text" id="q" placeholder="搜索：DOTA / Minecraft / Valorant …">
+      <button class="btn primary" id="searchBtn">搜索</button>
+      <button class="btn" id="joinSelBtn">加入选中</button>
+    </div>
+    <table>
+      <thead><tr><th>网络名</th></tr></thead>
+      <tbody id="pubBody"></tbody>
+    </table>
+    <div class="empty" id="pubEmpty">点「搜索」从服务器拉取可加入的公共网络</div>
+  </section>
+
+  <!-- 设置 -->
+  <section class="page" id="page-settings">
+    <h2>设置</h2>
+    <div class="hint">别名、连接信息与已知限制</div>
+    <div class="toolbar">
+      <input type="text" id="aliasInput" placeholder="新别名">
+      <button class="btn primary" id="aliasBtn">应用</button>
+    </div>
+    <table>
+      <tbody>
+        <tr><td class="tag" style="width:150px">管道路径</td><td class="mono">\\.\pipe\RadminVpnGuiChannel</td></tr>
+        <tr><td class="tag">后端</td><td>直连管道（进程内，无 HTTP 开销）</td></tr>
+        <tr><td class="tag">权限</td><td id="permText">—</td></tr>
+        <tr><td class="tag">本机节点</td><td id="selfNode" class="mono">—</td></tr>
+      </tbody>
+    </table>
+    <h2 style="margin-top:26px;font-size:14px">已知限制</h2>
+    <table><tbody>
+      <tr><td class="tag" style="width:150px">创建网络密码</td>
+          <td>暂不支持。抓到的创建请求全是免密码网络，密码字段位置未解出</td></tr>
+      <tr><td class="tag">踢人</td>
+          <td>只能对<b>已加入</b>网络的成员操作；公共网络页只是「可加入的清单」</td></tr>
+      <tr><td class="tag">网络改名</td>
+          <td>官方客户端也没有入口（CUpdateNetwork 不可达），未解</td></tr>
+    </tbody></table>
+  </section>
+</main>
+
+<footer>
+  <span id="status">就绪</span>
+  <span style="margin-left:auto" id="counts"></span>
+</footer>
+
+<div id="menu"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+const $ = s => document.querySelector(s);
+const state = {
+  page: "networks",
+  nets: [],
+  selNet: 0,
+  selMem: 0,
+  pub: [],
+  selPub: -1,
+  canWrite: true,
+  self: null,
+  powerOn: true,
+};
+
+// ── 网络请求
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({ ok: false, error: "响应不是 JSON" }));
+  if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j.data;
+}
+
+function toast(msg, bad) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.style.borderColor = bad ? "#5d2b36" : "#33405a";
+  t.style.color = bad ? "var(--bad)" : "var(--fg)";
+  t.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+function setStatus(s) { $("#status").textContent = s; }
+
+function busy(on) {
+  $("#spinner").innerHTML = on ? '<span class="spin">◌</span>' : "";
+}
+
+// ── 右键菜单
+function showMenu(ev, title, items) {
+  ev.preventDefault();
+  const m = $("#menu");
+  m.innerHTML = "";
+  if (title) {
+    const t = document.createElement("div");
+    t.className = "mt";
+    t.textContent = title;
+    m.appendChild(t);
+  }
+  for (const it of items) {
+    if (it === "-") { m.appendChild(document.createElement("hr")); continue; }
+    const b = document.createElement("button");
+    b.textContent = it.label;
+    if (it.danger) b.className = "danger";
+    b.onclick = () => { hideMenu(); it.run(); };
+    m.appendChild(b);
+  }
+  m.style.display = "block";
+  // 防止溢出视口
+  const r = m.getBoundingClientRect();
+  let x = ev.clientX, y = ev.clientY;
+  if (x + r.width > innerWidth - 6) x = innerWidth - r.width - 6;
+  if (y + r.height > innerHeight - 6) y = innerHeight - r.height - 6;
+  m.style.left = x + "px";
+  m.style.top = y + "px";
+}
+function hideMenu() { $("#menu").style.display = "none"; }
+addEventListener("click", hideMenu);
+addEventListener("blur", hideMenu);
+
+// ── 渲染
+function renderNav() {
+  $("#cNet").textContent = state.nets.length || "";
+  const mem = state.nets[state.selNet];
+  $("#cMem").textContent = mem ? mem.members.length : "";
+  $("#cPub").textContent = state.pub.length || "";
+}
+
+function renderSelf() {
+  const s = state.self;
+  $("#selfInfo").textContent = s
+    ? `${s.alias || "?"} · #${s.nodeId} · ${s.publicIp || "?"}`
+    : "本机信息不可用";
+  $("#selfNode").textContent = s ? "#" + s.nodeId : "—";
+  $("#counts").textContent = `网络 ${state.nets.length} · 成员 ${
+    state.nets.reduce((a, n) => a + n.members.length, 0)}`;
+}
+
+function renderPerm() {
+  const ok = state.canWrite;
+  $("#perm").innerHTML = ok
+    ? '<span class="dot ok"></span>可读写'
+    : '<span class="dot ro"></span>只读';
+  $("#permText").textContent = ok
+    ? "可读写"
+    : "只读 —— 受限环境会降低进程完整性级别，请用普通用户身份直接启动";
+  document.querySelectorAll(".btn.primary, .btn.danger").forEach(b => {
+    b.style.opacity = ok ? "1" : ".45";
+  });
+}
+
+function renderNets() {
+  const tb = $("#netBody");
+  tb.innerHTML = "";
+  const empty = state.nets.length === 0;
+  $("#netEmpty").style.display = empty ? "block" : "none";
+
+  state.nets.forEach((n, i) => {
+    const tr = document.createElement("tr");
+    if (i === state.selNet) tr.className = "sel";
+    tr.innerHTML = `<td>${esc(n.name)}</td>
+                    <td class="tag">${n.members.length}</td>
+                    <td class="mono">${n.guid.slice(0, 16)}…</td>`;
+    tr.onclick = () => { state.selNet = i; state.selMem = 0; renderNets(); renderMembers(); renderNav(); };
+    tr.ondblclick = () => { state.selNet = i; state.selMem = 0; switchPage("members"); };
+    tr.oncontextmenu = ev => showMenu(ev, n.name, [
+      { label: "查看成员", run: () => { state.selNet = i; state.selMem = 0; switchPage("members"); } },
+      { label: "启用网络", run: () => netOp(n.guid, "enabled", { enabled: true }, "启用 " + n.name) },
+      { label: "禁用网络", run: () => netOp(n.guid, "enabled", { enabled: false }, "禁用 " + n.name) },
+      "-",
+      { label: "复制 GUID", run: () => copy(n.guid, "已复制 GUID") },
+      "-",
+      { label: "离开网络", run: () => netOp(n.guid, "leave", undefined, "离开 " + n.name) },
+      { label: "删除网络", danger: true, run: () => netOp(n.guid, "delete", undefined, "删除 " + n.name) },
+    ]);
+    tb.appendChild(tr);
+  });
+}
+
+function renderMembers() {
+  const n = state.nets[state.selNet];
+  $("#memNetName").textContent = n ? "· " + n.name : "";
+  const tb = $("#memBody");
+  tb.innerHTML = "";
+  $("#memEmpty").style.display = n ? "none" : "block";
+  if (!n) return;
+
+  n.members.forEach((m, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="mono">${m.nodeId}</td>
+                    <td>${esc(m.alias || "-")}</td>
+                    <td class="ip">${esc(m.publicIp || "-")}</td>`;
+    tr.onclick = () => { state.selMem = i; };
+    const label = m.alias || ("#" + m.nodeId);
+    tr.oncontextmenu = ev => showMenu(ev, label, [
+      { label: "授权（管理员）", run: () => memOp(n.guid, m.nodeId, "grant", n.name, "授权 " + label) },
+      { label: "撤销管理员", run: () => memOp(n.guid, m.nodeId, "revoke", n.name, "撤权 " + label) },
+      { label: "批准加入", run: () => memOp(n.guid, m.nodeId, "approve", n.name, "批准 " + label) },
+      "-",
+      { label: "复制节点 ID", run: () => copy(String(m.nodeId), "已复制节点 ID") },
+      "-",
+      { label: "踢出网络", danger: true, run: () => memOp(n.guid, m.nodeId, "kick", n.name, "踢出 " + label) },
+    ]);
+    tb.appendChild(tr);
+  });
+}
+
+function renderPub() {
+  const tb = $("#pubBody");
+  tb.innerHTML = "";
+  $("#pubEmpty").style.display = state.pub.length ? "none" : "block";
+  state.pub.forEach((name, i) => {
+    const tr = document.createElement("tr");
+    if (i === state.selPub) tr.className = "sel";
+    tr.innerHTML = `<td>${esc(name)}</td>`;
+    tr.onclick = () => { state.selPub = i; renderPub(); };
+    tr.ondblclick = () => doJoin(name);
+    tr.oncontextmenu = ev => showMenu(ev, name, [
+      { label: "加入这个网络", run: () => doJoin(name) },
+      { label: "复制网络名", run: () => copy(name, "已复制") },
+    ]);
+    tb.appendChild(tr);
+  });
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function copy(text, msg) {
+  navigator.clipboard?.writeText(text).then(
+    () => toast(msg || "已复制"),
+    () => toast("复制失败", true));
+}
+
+// ── 操作
+async function netOp(guid, op, body, label) {
+  try {
+    busy(true);
+    await api(`/api/networks/${guid}/${op}`, body);
+    toast("已请求：" + label);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+  finally { busy(false); }
+}
+
+async function memOp(guid, nodeId, op, name, label) {
+  try {
+    busy(true);
+    await api(`/api/networks/${guid}/members/${nodeId}/${op}`, { name });
+    toast("已请求：" + label);
+  } catch (e) { toast(e.message, true); }
+  finally { busy(false); }
+}
+
+async function doJoin(name) {
+  try {
+    busy(true);
+    await api("/api/networks/join", { name });
+    toast("已请求加入 " + name);
+    state.pub = [];
+    renderPub();
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+  finally { busy(false); }
+}
+
+async function refresh() {
+  try {
+    busy(true);
+    const d = await api("/api/state");
+    state.nets = d.networks || [];
+    state.canWrite = d.canWrite;
+    state.self = d.self;
+    if (state.selNet >= state.nets.length) state.selNet = 0;
+    renderSelf(); renderPerm(); renderNets(); renderMembers(); renderNav();
+    setStatus("已刷新 · " + new Date().toLocaleTimeString());
+  } catch (e) { toast(e.message, true); setStatus("刷新失败：" + e.message); }
+  finally { busy(false); }
+}
+
+function switchPage(p) {
+  state.page = p;
+  document.querySelectorAll(".nav button").forEach(b =>
+    b.classList.toggle("on", b.dataset.page === p));
+  document.querySelectorAll(".page").forEach(s =>
+    s.classList.toggle("on", s.id === "page-" + p));
+}
+
+// ── 事件绑定
+document.querySelectorAll(".nav button").forEach(b => {
+  b.onclick = () => switchPage(b.dataset.page);
+});
+
+$("#refreshBtn").onclick = refresh;
+
+$("#powerBtn").onclick = async () => {
+  const target = !state.powerOn;
+  try {
+    busy(true);
+    await api("/api/power", { on: target });
+    state.powerOn = target;
+    const b = $("#powerBtn");
+    b.textContent = target ? "⏻ 已开启" : "⏻ 已关闭";
+    b.className = "btn power " + (target ? "on" : "off");
+    toast(target ? "已请求开启 VPN" : "已请求关闭 VPN");
+  } catch (e) { toast(e.message, true); }
+  finally { busy(false); }
+};
+
+$("#joinBtn").onclick = () => {
+  const name = $("#joinName").value.trim();
+  if (name) doJoin(name);
+};
+$("#createBtn").onclick = async () => {
+  const name = $("#joinName").value.trim();
+  if (!name) return;
+  try {
+    busy(true);
+    await api("/api/networks/create", { name });
+    toast("已请求创建 " + name);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+  finally { busy(false); }
+};
+
+$("#aliasBtn").onclick = async () => {
+  const alias = $("#aliasInput").value.trim();
+  if (!alias) return;
+  try {
+    busy(true);
+    await api("/api/alias", { alias });
+    toast("已请求改别名 → " + alias);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+  finally { busy(false); }
+};
+
+$("#searchBtn").onclick = async () => {
+  const q = encodeURIComponent($("#q").value.trim());
+  try {
+    busy(true);
+    setStatus("正在枚举公共网络…");
+    const d = await api("/api/public?search=" + q);
+    state.pub = d.networks || [];
+    state.selPub = state.pub.length ? 0 : -1;
+    renderPub(); renderNav();
+    setStatus(`公共网络 ${state.pub.length} 个`);
+  } catch (e) { toast(e.message, true); setStatus("搜索失败：" + e.message); }
+  finally { busy(false); }
+};
+
+$("#joinSelBtn").onclick = () => {
+  if (state.selPub >= 0 && state.pub[state.selPub]) doJoin(state.pub[state.selPub]);
+};
+
+// ── 启动
+refresh();
+setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 8000);
+</script>
+</body>
+</html>
