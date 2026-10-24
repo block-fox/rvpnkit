@@ -265,3 +265,46 @@ python native/dump_by_reqid.py 33 35 51
 python native/rvpncmd.py join "网络名"
 python native/rvpncmd.py alias "新别名"
 ```
+
+---
+
+## 七、快照解析：拿到 GUID 与节点 ID
+
+启用/禁用、删除、离开、踢人这些命令的载荷是 **GUID / 节点 ID**，不是名字。
+这些 ID 只存在于管道快照里，`native/rvpnstate.py` 负责把它们挖出来。
+
+```powershell
+python native\rvpnstate.py          # 列出所有网络（名字 + GUID）和节点 ID
+python native\rvpnstate.py --json   # 机器可读
+```
+
+解析要点：
+- 快照不是一条流，而是**多帧拼接**：每帧 `[u32 LE 长度][正文]`，必须先拆帧
+- 正文里的记录：`[size:u32 BE][类型码][0x00][0x03][字段][payload]`
+- 容器记录的类型码是 `0x00` 且第 4 字节为 `0x13`（即 `0x1323` / `0x132b` / `0x1344`）
+- 网络条目 = 同一个容器里既有 16 字节 GUID（类型 `0x0d`、字段 `0x09`）
+  又有名字（类型 `0x03`、字段 `0x06`）
+- 节点块 = `00 00 00 08 02 00 01 e1 <u64 节点ID>`
+
+实测：一次读取解析出 **13 个网络**（名字与 GUID 一一对应）和 **1209 个节点**。
+
+## 八、实测记录汇总
+
+| 命令 | 服务端日志实证 |
+|---|---|
+| 加入网络 | `[req:2113] Succeeded` |
+| 创建网络 | `Requested to create network 'rvpnkit-test-可删'` → `Succeeded` |
+| 删除网络 | `Requested to delete network 'rvpnkit-test-可删'` → `Succeeded` |
+| 改别名 | `Requested to change alias to '快乐狐狸1'` → `Succeeded` |
+| **禁用网络** | `Disabled network 'Minecraft [中文 14]'` |
+| **启用网络** | `Enabled network 'Minecraft [中文 14]'` |
+| 踢人 / 批准 / 授管 / 撤管 | `Requested to remove/grant/approve/revoke ...`（用不存在目标验证格式） |
+
+## 九、仍未定位
+
+`CSwitchPower`（VPN 总开关）与 `CUpdateNetwork`（网络改名）：
+类名与日志模板（`Switched On/Off`、`Requested to update network`）都已确认，
+但命令码不在 `0x1244e0` 那张任务表里 —— 说明它们不走任务型通道。
+用 GUID / 节点 / 空载荷 / 各种 u32 字段共扫了约 600 次请求均无响应，
+下一步需要从 GUI 侧找到 `CSwitchPower` 的构造点，或反汇编 12 字节消息 ID
+的分派表（`0x444xxx` 那段按 12 字节比较来分派）。
