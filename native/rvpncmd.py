@@ -46,8 +46,13 @@ SVC = r"C:\ProgramData\Famatech\Radmin VPN\service.log"
 
 CMD_CREATE = 0x02
 CMD_JOIN = 0x03
+CMD_LEAVE = 0x05
+CMD_KICK = 0x06
 CMD_SET_ENABLED = 0x08
+CMD_APPROVE_JOIN = 0x0A
 CMD_DELETE = 0x0F
+CMD_GRANT_ADMIN = 0x10
+CMD_REVOKE_ADMIN = 0x11
 CMD_ALIAS = 0x12
 CMD_ENUM = 0x13
 
@@ -115,6 +120,31 @@ def build_delete(guid: bytes, req_id: int) -> bytes:
 def build_enum(prefix: str, req_id: int) -> bytes:
     """枚举公共网络：命令码 0x13，字段 0x06 是过滤前缀（空串=全部）。"""
     return head(req_id, CMD_ENUM) + rec_str(prefix, 0x06)
+
+
+def rec_node(node_id: int) -> bytes:
+    """节点 ID 记录。
+
+    注意这条的头是 `02 00 01 e1`，不是通用的 `01 00 03 xx`：
+        00 00 00 08 02 00 01 e1 <u64 节点ID>
+    """
+    return (struct.pack(">I", 8) + bytes([0x02, 0x00, 0x01, 0xE1])
+            + struct.pack(">Q", node_id))
+
+
+def build_member_op(code: int, guid: bytes, node_id: int, name: str,
+                    req_id: int) -> bytes:
+    """成员类操作：踢人 / 批准加入 / 授予管理员 / 撤销管理员。
+
+    这四条用同一种载荷形状（GUID + 节点 ID + 网络名），是从命令码扫描里
+    确定的：服务日志分别写出
+        Requested to remove <node> from network '<unknown>'
+        Requested to approve join <node> into '<unknown>'
+        Requested to grant admin to <node> in network '<unknown>'
+        Requested to revoke admin from <node> in network '<unknown>'
+    """
+    return (head(req_id, code) + rec_guid(guid) + rec_node(node_id)
+            + rec_str(name, 0x06))
 
 
 def build_set_enabled(guid: bytes, enabled: bool, req_id: int) -> bytes:
@@ -268,6 +298,40 @@ def main(argv):
         rid = new_req_id()
         body = build_create(argv[2], rid)
         return dispatch(body, rid, f"创建网络 '{argv[2]}'")
+
+    if a in ("kick", "approve", "grant", "revoke") and len(argv) > 3:
+        # 用法：kick <网络GUID> <节点ID> [网络名]
+        try:
+            guid = bytes.fromhex(re.sub(r"[\s\-]", "", argv[2]))
+        except ValueError:
+            print("GUID 需要是十六进制")
+            return 2
+        try:
+            node = int(argv[3], 0)
+        except ValueError:
+            print("节点 ID 需要是十进制或 0x 十六进制")
+            return 2
+        name = argv[4] if len(argv) > 4 else ""
+        table = {
+            "kick": (CMD_KICK, "踢出成员"),
+            "approve": (CMD_APPROVE_JOIN, "批准加入"),
+            "grant": (CMD_GRANT_ADMIN, "授予管理员"),
+            "revoke": (CMD_REVOKE_ADMIN, "撤销管理员"),
+        }
+        code, label = table[a]
+        rid = new_req_id()
+        body = build_member_op(code, guid, node, name, rid)
+        return dispatch(body, rid, f"{label} 节点={node} 网络={guid.hex()}")
+
+    if a == "leave" and len(argv) > 2:
+        try:
+            guid = bytes.fromhex(re.sub(r"[\s\-]", "", argv[2]))
+        except ValueError:
+            print("GUID 需要是十六进制")
+            return 2
+        rid = new_req_id()
+        return dispatch(head(rid, CMD_LEAVE) + rec_guid(guid), rid,
+                        f"离开网络 GUID={guid.hex()}")
 
     if a == "alias" and len(argv) > 2:
         rid = new_req_id()

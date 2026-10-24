@@ -58,23 +58,72 @@ GUI 往管道里**写两次**：
 
 ## 三、命令表
 
-全部经过**实测**验证（不只是抓到，而是自己也发出去并收到 `Succeeded`）。
+代码里的命令类来自 `RvControlSvc.exe` 的 RTTI（命名空间 `cmd@msg@ControlSvc`）。
+命令码则通过两条**不需要动界面**的路子确定：命令码扫描 + 二进制的码表定位。
 
-| 命令码 | 名称 | 帧长 | 实测 |
-|---|---|---|---|
-| `0x02` (2) | **创建网络** | 96~122 | ✅ 实测成功 |
-| `0x03` (3) | **加入网络** | 86~102 | ✅ 实测成功 |
-| `0x08` (8) | **启用 / 禁用网络** | 60 | ✅ 帧逐字节核对（未实际切换） |
-| `0x0f` (15) | **删除网络** | 48 | ✅ 实测成功 |
-| `0x12` (18) | **改别名** | 42~46 | ✅ 实测成功 |
-| `0x13` (19) | 网络查询（语义待定） | 34~60 | 仅抓到 |
-| `0x01` (1) | 节点可见性上报 | 60~1464 | 无需实现 |
+| 码 | 命令类 | 功能 | 载荷 | 验证方式 |
+|---|---|---|---|---|
+| `0x02` | `CCreateNetwork` | 创建网络 | 容器 `0x132b`：u32(0)+名字+28 字节随机密钥 | ✅ 实测 Succeeded |
+| `0x03` | `CJoinNetwork` | 加入网络 | 容器 `0x131b`：u32(1)+名字 | ✅ 实测 Succeeded |
+| `0x05` | `CLeaveNetwork` | 离开网络 | 16 字节 GUID | ✅ 服务日志实证 |
+| `0x06` | `CKickNode` | **踢出成员** | GUID + 节点ID + 网络名 | ✅ 服务日志实证 |
+| `0x08` | `CEnableNetwork` | 启用/禁用网络 | GUID + u32(0/1) 字段 `0x16` | ✅ 帧逐字节核对 |
+| `0x0a` | `CApproveJoin` | 批准加入 | GUID + 节点ID + 网络名 | ✅ 服务日志实证 |
+| `0x0f` | `CDeleteNetwork` | 删除网络 | 16 字节 GUID | ✅ 实测 Succeeded |
+| `0x10` | `CGrantAdmin` | 授予管理员 | GUID + 节点ID + 网络名 | ✅ 服务日志实证 |
+| `0x11` | `CRevokeAdmin` | 撤销管理员 | GUID + 节点ID + 网络名 | ✅ 服务日志实证 |
+| `0x12` | `CChangeAlias` | 改别名 | 字符串字段 `0x04` | ✅ 实测 Succeeded |
+| `0x13` | `CEnumPublicNetworks` | 枚举公共网络 | 字符串字段 `0x06` | 仅抓到 |
+| ? | `CSwitchPower` | **开关网络电源** | 未定 | 类名已确认，码未定位 |
+| ? | `CUpdateNetwork` | 网络改名 | 未定 | 类名已确认，码未定位 |
 
-> **对账必须用「时间戳 + reqId」两个条件。** 服务重启或日志轮转后请求编号
-> 会从头计数，实测同一个 `reqId=35` 在早先日志里是「离开网络」，在当前日志
-> 里却是「创建网络 '111111111'」。只按 reqId 关联会张冠李戴 —— 我第一版
-> 分析就犯了这个错，把 `0x08` 误判成「离开网络」。
-> `native/correlate.py` 已改为双重条件，时间差全部 0.00s。
+### 二进制里确认的完整命令类清单
+
+```
+CApproveJoin      CChangeAlias     CCreateNetwork    CDeleteNetwork
+CEnableNetwork    CGrantAdmin      CJoinNetwork      CKickNode
+CLeaveNetwork     CRevokeAdmin     CSwitchPower      CUpdateNetwork
+CEnumPublicNetworks  CUpdateVisibleNodes  CSetSettings  CManageNetwork
+CEnumerateProcesses  COpenChat  CAddFirewallException  CRemoveFirewallException
+CClearExcludedFromFirewall  CExcludeFromFirewall  CCancelTask
+CLanguageChanged  CDbgActivateProfile  CDbgEmulateSystemWakeUp
+CDbgRenameActiveProfile  CAdapterReinstalled
+```
+
+以及对应的 `CTaskCompleted_*` 系列（`_KickNode`、`_GrantAdmin`、`_RevokeAdmin`、
+`_ApproveJoin`、`_UpdateNetwork`、`_EnableAdapter`、`_SetupAdapter`、`_Register` …），
+说明这些操作都是「带请求编号的任务型命令」。
+
+### 服务端的日志模板（来自字符串常量）
+
+```
+Requested to approve join %llu/'%ls' into '%ls'
+Requested to change alias to '%ls'
+Requested to create network '%ls'
+Requested to delete network '%ls'
+Enabled network '%ls'  /  Disabled network '%ls'
+Requested to grant admin to %llu/'%ls' in network '%ls'
+Requested to join network '%ls' %hs password
+Requested to remove %llu/'%ls' from network '%ls'
+Requested to leave network '%ls'
+Requested to revoke admin from %llu/'%ls' in network '%ls'
+Switched On  /  Switched Off
+Requested to update network '%ls'
+```
+
+### 命令码表在二进制里的位置
+
+`RvControlSvc.exe` 偏移 **`0x001244e0`** 处有一张 `(命令码, 任务类型)` 配对表：
+
+```
+(1,22) (2,2) (3,2) (4,24) (5,13) (6,9) (7,12) (8,12) (9,12)
+(10,7) (11,8) (12,22) (13,22) (15,2) (16,13) (17,18) (18,2)
+(33,13) (53,2) (65,13)
+```
+
+已知码全部能在表里找到；缺 `14/19~32/34~52` 说明那不是"任务型"命令
+（例如枚举公共网络、节点可见性上报都不产生请求编号，因此不在这张表里）。
+
 
 ### 创建网络（命令码 0x02）
 
