@@ -108,3 +108,30 @@ POST /api/networks/{guid}/members/{nodeId}/kick|approve|grant|revoke
 
 `rust/crates/rvpn-gui` 是 egui 原生窗口版本，**当前不参与构建**（工具链缺
 dlltool/as）。等有 MSVC 工具链时可以直接接回去。
+
+---
+
+## 双后端（已打通）
+
+```
+rvpnkit --no-open                     直连管道（默认，最快）
+rvpnkit --agent http://host:8770      转发给 agent（跨平台 / 远程）
+```
+
+直连模式下所有管道 I/O 在进程内完成；`--agent` 模式下整条 REST 路径原样透传，
+agent 的 `{"ok":..,"data":..}` 信封与本地响应格式一致，所以前端代码完全不用改。
+
+HTTP 客户端**没有引 reqwest/ureq** —— 那会带进 openssl/rustls 之类的重依赖，
+而这里只需要对本机/局域网的明文 HTTP 说几句话，用 `std::net::TcpStream`
+手写一个极简客户端（含 chunked 解码）反而更可控。
+
+实测链路：
+
+```
+Rust 客户端 :8789  --agent http://127.0.0.1:8770
+    ↓ HTTP
+.NET agent :8770
+    ↓ 命名管道
+Radmin 服务
+→ /api/state  HTTP 200 · 14 网络 · 3492 成员
+```

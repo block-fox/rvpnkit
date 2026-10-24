@@ -15,9 +15,12 @@
 //!
 //! 协议逻辑全部在 `rvpn-core` 里，这个 crate 只负责 HTTP 和界面。
 
+mod backend;
+
+use backend::Backend;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rvpn_core::commands::next_request_id;
@@ -25,6 +28,12 @@ use rvpn_core::pipe::PipeClient;
 use rvpn_core::{Commands, CommandCode, PublicNetworks, SnapshotState, DEFAULT_PIPE};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8788";
+
+static BACKEND: OnceLock<Backend> = OnceLock::new();
+
+fn backend() -> &'static Backend {
+    BACKEND.get().expect("后端未初始化")
+}
 
 #[cfg(windows)]
 #[link(name = "kernel32")]
@@ -44,6 +53,7 @@ fn main() {
     win_utf8_console();
     let mut addr = DEFAULT_ADDR.to_string();
     let mut open_browser = true;
+    let mut agent: Option<String> = None;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -51,6 +61,10 @@ fn main() {
         match args[i].as_str() {
             "--addr" if i + 1 < args.len() => {
                 addr = args[i + 1].clone();
+                i += 2;
+            }
+            "--agent" if i + 1 < args.len() => {
+                agent = Some(args[i + 1].clone());
                 i += 2;
             }
             "--no-open" => {
@@ -70,6 +84,27 @@ fn main() {
         }
     }
 
+    let chosen = match &agent {
+        Some(url) => match Backend::http(url) {
+            Some(b) => b,
+            None => {
+                eprintln!("--agent 需要形如 http://127.0.0.1:8770 的地址");
+                std::process::exit(2);
+            }
+        },
+        None => Backend::Pipe,
+    };
+
+    if !chosen.probe() {
+        eprintln!(
+            "后端不可用：{}\n  直连模式需要本机 Radmin 服务；HTTP 模式需要先启动 rvpnkit-agent。",
+            chosen.label()
+        );
+        std::process::exit(3);
+    }
+    let _ = BACKEND.set(chosen);
+    let backend_label = backend().label();
+
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
@@ -87,14 +122,24 @@ fn main() {
     println!("  +--------------------------------------------------+");
     println!();
     println!("  界面      {url}");
+    println!("  后端      {backend_label}");
     println!("  管道      {DEFAULT_PIPE}");
-    if let Ok(p) = PipeClient::connect(DEFAULT_PIPE) {
-        println!(
-            "  权限      {}",
-            if p.can_write() { "可读写" } else { "只读（受限环境会降低完整性级别）" }
-        );
-    } else {
-        println!("  权限      管道不可用");
+    if matches!(backend(), Backend::Pipe) {
+        // 管道实例数有限，刚断开时立刻重连可能失败，重试几次再下结论。
+        let mut report = "管道不可用".to_string();
+        for _ in 0..6 {
+            if let Ok(p) = PipeClient::connect(DEFAULT_PIPE) {
+                report = if p.can_write() {
+                    "可读写".to_string()
+                } else {
+                    "只读（受限环境会降低完整性级别）".to_string()
+                };
+                drop(p);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        println!("  权限      {report}");
     }
     println!();
     println!("  按 Ctrl+C 退出");
@@ -239,6 +284,28 @@ fn json_err(status: u16, msg: impl Into<String>) -> (u16, &'static str, Vec<u8>)
 }
 
 fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
+    // HTTP 后端：除首页外整条路径原样转发给远程 agent。
+    // agent 的响应本来就是同一套 {"ok":..,"data":..} 信封，直接透传即可。
+    if matches!(backend(), Backend::Http { .. }) {
+        if req.path == "/" {
+            return (200, "text/html; charset=utf-8", UI.as_bytes().to_vec());
+        }
+        let target = if req.query.is_empty() {
+            req.path.clone()
+        } else {
+            format!("{}?{}", req.path, req.query)
+        };
+        let result = if req.method == "POST" {
+            backend::http_post(backend(), &target, &req.body)
+        } else {
+            backend::http_get(backend(), &target)
+        };
+        return match result {
+            Ok((status, body)) => (status, "application/json; charset=utf-8", body.into_bytes()),
+            Err(e) => json_err(502, format!("转发到 agent 失败：{e}")),
+        };
+    }
+
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => (200, "text/html; charset=utf-8", UI.as_bytes().to_vec()),
         ("GET", "/api/state") => api_state(&req.query),
