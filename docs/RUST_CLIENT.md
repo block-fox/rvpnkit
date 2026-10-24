@@ -48,3 +48,35 @@ Web UI 截图见 `docs/rust-web-ui.png`。
 | 分发 | 4.8 MB 单文件 | 605 KB 单文件 |
 | 远程管理 | 不行 | 天然支持（`--addr 0.0.0.0`） |
 | 原生窗口 | ✅ | ❌（但可以套 WebView2 壳） |
+
+---
+
+## 原生窗口（主力客户端）
+
+`rvpnkit-gui.exe` 是图形化主力，Web UI 只作备用。
+
+| 能力 | 说明 |
+|---|---|
+| 深浅色主题 | 设置页切换，写入 `%APPDATA%\RvpnKit\ui.conf`，默认浅色 |
+| 成员多选 | 勾选列 + 全选/清空 + 筛选框，选中后可批量授权/撤权/踢出/复制 ID |
+| 属性弹窗 | 双击成员或右键「查看属性」；控制面拿不到的字段标「—（控制面快照未提供）」 |
+| 右键菜单 | 网络行、成员行、公共网络行都能右键 |
+| 节点 ID 说明 | 表头与弹窗里都注明它是 Radmin 内部编号，不是 IP |
+
+调试/截图用的命令行参数：
+
+```
+rvpnkit-gui.exe --light | --dark     指定主题
+rvpnkit-gui.exe --page=members       直接进某个页面（networks/members/public/settings）
+rvpnkit-gui.exe --props              自动打开第一个成员的属性
+```
+
+### 踩过的坑
+
+- `ui.add_sized([w,h], SelectableLabel)` 会把文字**居中**，列表行要用
+  `allocate_exact_size` + `painter.text` 自绘才左对齐。
+- `Window` 传了自定义 `frame()` 后标题栏会变成灰色，改用 `title_bar(false)`
+  自己画标题行。
+- `card(&self, ...)` 与闭包里的 `self` 抢借用，卡片容器改成自由函数。
+- 空闲时不重绘，某些合成器会留着上一帧残影（表现为界面里出现窗外桌面图案），
+  所以空闲也保持 400ms 一次的低频重绘。
