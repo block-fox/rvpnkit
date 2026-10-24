@@ -36,7 +36,7 @@ src\RvpnKit.Agent\bin\Release\net10.0\rvpnkit-agent.exe --port 8770
 服务信息，**不需要鉴权**，方便探活。
 
 ### `GET /api/state[?refresh=1]`
-当前状态：本机信息、所有网络（含 GUID）、每个网络的成员（节点 ID / 别名 / 公网 IP）。
+当前状态：本机信息、所有网络（含 GUID）、每个网络的成员（节点 ID / 别名 / 公网 IP / 虚拟 IPv4 / IPv6 / 状态 / 角色 / 通道 / 延迟 / 版本）。
 结果缓存 5 秒，`refresh=1` 强制重读。
 
 ```json

@@ -96,7 +96,10 @@ fn last_error(message: &str) -> PipeError {
 }
 
 fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 控制管道客户端。
@@ -110,6 +113,69 @@ pub struct PipeClient {
 unsafe impl Send for PipeClient {}
 
 impl PipeClient {
+    /// Wait for the explicit completion carrying this request ID. An initial
+    /// snapshot or unrelated event never counts as a successful command.
+    pub fn transact(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<crate::operation::Completion, PipeError> {
+        let request_id = crate::Wire::request_id(frame);
+        self.send(frame)?;
+        let started = Instant::now();
+        let mut data = Vec::new();
+        let mut buffer = vec![0u8; 65536];
+        while started.elapsed() < timeout {
+            let mut available: Dword = 0;
+            if unsafe {
+                PeekNamedPipe(
+                    self.handle,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(last_error("等待回执时管道断开"));
+            }
+            if available > 0 {
+                let mut got: Dword = 0;
+                let count = (available as usize).min(buffer.len());
+                if unsafe {
+                    ReadFile(
+                        self.handle,
+                        buffer.as_mut_ptr(),
+                        count as Dword,
+                        &mut got,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(last_error("读取服务回执失败"));
+                }
+                if data.len() + got as usize > 8 * 1024 * 1024 {
+                    return Err(PipeError {
+                        code: 0,
+                        message: "服务回执超过 8 MiB 限制".into(),
+                    });
+                }
+                data.extend_from_slice(&buffer[..got as usize]);
+                if let Some(completion) = crate::operation::Completion::find(&data, request_id) {
+                    return completion
+                        .into_result()
+                        .map_err(|message| PipeError { code: 0, message });
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Err(PipeError {
+            code: 1460,
+            message: format!("请求 #{request_id} 已发送，但未收到服务确认；请刷新核对，勿重复提交"),
+        })
+    }
     /// 连接控制管道。读写失败会自动降级为只读。
     pub fn connect(path: &str) -> Result<Self, PipeError> {
         let w = wide(path);
@@ -250,6 +316,12 @@ impl PipeClient {
                     break;
                 }
                 out.extend_from_slice(&buf[..got as usize]);
+                if out.len() > 8 * 1024 * 1024 {
+                    return Err(PipeError {
+                        code: 0,
+                        message: "快照超过 8 MiB 限制".into(),
+                    });
+                }
                 last_data = Instant::now();
             } else {
                 if !out.is_empty() && last_data.elapsed() > idle {

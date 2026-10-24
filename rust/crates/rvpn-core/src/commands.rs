@@ -52,11 +52,8 @@ fn head(request_id: u32, code: CommandCode) -> Frame {
 ///
 /// 最后一位（i == n）没有对应字符，按 0 处理，所以两半的最后一位完全相同。
 ///
-/// 换句话说：密码是**逐字节异或在高字节上**的。这意味着拿到令牌就能
-/// 直接反推出密码 —— Radmin 这个设计相当于把密码明文写在了令牌里。
-///
-/// 注意：这里按 UTF-8 字节处理密码。全部样本都是 ASCII，此时字节数等于
-/// 字符数；含中文等非 ASCII 字符时长度口径尚未验证。
+/// 实际输入使用 UTF-16LE，两半逐字节异或后可恢复原密码。
+/// 这只是官方协议的可逆编码，不是加密；不要记录或导出令牌。
 pub fn password_token(password: &str) -> Vec<u8> {
     // 密码按 UTF-16LE 编码（不是 UTF-8！）。ASCII 时两者只差一个 0 字节，
     // 所以早先用 ASCII 样本得出的「只异或高字节」其实是特例。
@@ -82,24 +79,31 @@ pub fn password_token(password: &str) -> Vec<u8> {
 
 /// 取 `len` 个随机字节。
 ///
-/// 不引 rand crate：这里只要求「每次不同」，不需要密码学强度 ——
-/// 服务端是把令牌和它存的密码做异或校验的，随机数本身可以任意。
+/// 使用操作系统随机数；失败时终止构造，绝不降级为时间戳伪随机数。
 fn random_bytes_of(len: usize) -> Vec<u8> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut state = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9e37_79b9_7f4a_7c15)
-        ^ ((std::process::id() as u64) << 32);
-
-    let mut out = Vec::with_capacity(len + 8);
-    while out.len() < len {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        out.extend_from_slice(&state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes());
+    let mut out = vec![0; len];
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                algorithm: *mut std::ffi::c_void,
+                buffer: *mut u8,
+                size: u32,
+                flags: u32,
+            ) -> i32;
+        }
+        let size = u32::try_from(len).expect("随机数请求过大");
+        let status = unsafe { BCryptGenRandom(std::ptr::null_mut(), out.as_mut_ptr(), size, 2) };
+        assert!(status >= 0, "系统随机数发生器不可用");
     }
-    out.truncate(len);
+    #[cfg(not(windows))]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut out))
+            .expect("系统随机数发生器不可用");
+    }
     out
 }
 
@@ -273,33 +277,18 @@ impl Commands {
 
 /// 生成 28 字节随机密钥。
 ///
-/// 不引 rand crate：用系统时间的纳秒 + 进程 id 混合，够用且零依赖。
-/// 这个值只是给新网络当随机标识，不需要密码学强度。
 fn random_bytes() -> Vec<u8> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut state = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9e37_79b9_7f4a_7c15)
-        ^ (std::process::id() as u64) << 32;
-    let mut out = Vec::with_capacity(28);
-    for _ in 0..7 {
-        // xorshift64*
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        out.extend_from_slice(&state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes());
-    }
-    out.truncate(28);
-    out
+    random_bytes_of(28)
 }
 
 /// 生成一个请求编号。
 pub fn next_request_id() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(12345);
-    (nanos % 0xFFFE) + 1
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQUENCE: AtomicU32 = AtomicU32::new(1);
+    loop {
+        let id = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
 }

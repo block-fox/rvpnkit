@@ -14,6 +14,8 @@ pub enum RecordType {
     Str = 0x03,
     /// u64 记录。
     UInt64 = 0x08,
+    /// 16-byte virtual IPv6 address.
+    Address = 0x09,
     /// u32 记录，多用于标志位。
     UInt32Alt = 0x0b,
     /// 16 字节 GUID（网络标识）。
@@ -256,6 +258,13 @@ impl Wire {
     ///
     /// 容器判定：类型码 `0x00` 且记录头第 4 字节为 `0x13`。
     pub fn parse(data: &[u8]) -> Vec<Record> {
+        Self::parse_depth(data, 0)
+    }
+
+    fn parse_depth(data: &[u8], depth: usize) -> Vec<Record> {
+        if depth >= 32 {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         let mut off = 0usize;
         while off + 8 <= data.len() {
@@ -271,7 +280,7 @@ impl Wire {
 
             let payload = data[off + 8..off + 8 + size].to_vec();
             let children = if ty == RecordType::Container as u8 && tag_byte == 0x13 {
-                Some(Self::parse(&payload))
+                Some(Self::parse_depth(&payload, depth + 1))
             } else {
                 None
             };

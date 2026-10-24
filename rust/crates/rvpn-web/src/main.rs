@@ -1,34 +1,22 @@
-﻿//! Radmin VPN 图形客户端：Rust 后端 + 本地 Web UI。
-//!
-//! 为什么不是原生窗口
-//! ------------------
-//! 本来打算用 egui。但本机只有 `x86_64-pc-windows-gnu` 工具链（没装 MSVC），
-//! 而 egui 的依赖链里 `parking_lot_core` / `libloading` / `windows-sys` 都用了
-//! `raw-dylib` 链接属性，rustc 会调用 `dlltool` 现场生成导入库 —— 而 Rust 自带
-//! 的 dlltool 又需要 `as.exe` 才能汇编桩代码，工具链里没有，MSYS2 的 as 又缺运行库。
-//!
-//! 与其在这上面耗，不如换成「Rust 后端 + 本地 Web UI」：
-//!   * 零 GUI 依赖，构建只依赖 rvpn-core + serde_json（已验证可编译）
-//!   * 界面用 HTML/CSS，比默认 egui 好看得多，分页栏和右键菜单是原生能力
-//!   * 天然跨平台（Windows / Linux / macOS 都能跑，用浏览器看）
-//!   * 不会出现「启动先透明一下」那种合成器问题
-//!
-//! 协议逻辑全部在 `rvpn-core` 里，这个 crate 只负责 HTTP 和界面。
-
 mod backend;
+mod http;
+use http::Request;
 
 use backend::Backend;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rvpn_core::commands::next_request_id;
 use rvpn_core::pipe::PipeClient;
-use rvpn_core::{Commands, CommandCode, PublicNetworks, SnapshotState, DEFAULT_PIPE};
+use rvpn_core::{CommandCode, Commands, PublicNetworks, SnapshotState, DEFAULT_PIPE};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8788";
 
+static PIPE_GATE: Mutex<()> = Mutex::new(());
+static STATE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
 static BACKEND: OnceLock<Backend> = OnceLock::new();
 
 fn backend() -> &'static Backend {
@@ -55,6 +43,7 @@ fn main() {
     let mut open_browser = true;
     let mut agent: Option<String> = None;
     let mut dump: Option<String> = None;
+    let mut demo = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -72,6 +61,10 @@ fn main() {
                 dump = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--demo" => {
+                demo = true;
+                i += 1;
+            }
             "--no-open" => {
                 open_browser = false;
                 i += 1;
@@ -79,7 +72,7 @@ fn main() {
             "--help" | "-h" => {
                 println!(
                     "rvpnkit —— Radmin VPN 图形客户端（本地 Web UI）\n\n\
-                     用法: rvpnkit [--addr 127.0.0.1:8788] [--no-open]\n\n\
+                     用法: rvpnkit [--addr 127.0.0.1:8788] [--agent http://host:port] [--demo] [--no-open]\n\n\
                      \x20 --addr <地址>  监听地址，默认 {DEFAULT_ADDR}\n\
                      \x20 --no-open     不自动打开浏览器"
                 );
@@ -92,29 +85,31 @@ fn main() {
     // 调试用：把原始快照写盘，方便离线分析字段结构
     if let Some(path) = &dump {
         match rvpn_core::pipe::PipeClient::connect(DEFAULT_PIPE) {
-            Ok(mut pipe) => {
-                match pipe.read_snapshot(std::time::Duration::from_millis(3000)) {
-                    Ok(raw) => match std::fs::write(path, &raw) {
-                        Ok(()) => println!("已写入 {} 字节到 {path}", raw.len()),
-                        Err(e) => eprintln!("写文件失败：{e}"),
-                    },
-                    Err(e) => eprintln!("读快照失败：{e}"),
-                }
-            }
+            Ok(mut pipe) => match pipe.read_snapshot(std::time::Duration::from_millis(3000)) {
+                Ok(raw) => match std::fs::write(path, &raw) {
+                    Ok(()) => println!("已写入 {} 字节到 {path}", raw.len()),
+                    Err(e) => eprintln!("写文件失败：{e}"),
+                },
+                Err(e) => eprintln!("读快照失败：{e}"),
+            },
             Err(e) => eprintln!("连不上管道：{e}"),
         }
         return;
     }
 
-    let chosen = match &agent {
-        Some(url) => match Backend::http(url) {
-            Some(b) => b,
-            None => {
-                eprintln!("--agent 需要形如 http://127.0.0.1:8770 的地址");
-                std::process::exit(2);
-            }
-        },
-        None => Backend::Pipe,
+    let chosen = if demo {
+        Backend::Demo
+    } else {
+        match &agent {
+            Some(url) => match Backend::http(url) {
+                Some(b) => b,
+                None => {
+                    eprintln!("--agent 需要形如 http://127.0.0.1:8770 的地址");
+                    std::process::exit(2);
+                }
+            },
+            None => Backend::Pipe,
+        }
     };
 
     if !chosen.probe() {
@@ -122,7 +117,7 @@ fn main() {
             "后端不可用：{}\n  直连模式需要本机 Radmin 服务；HTTP 模式需要先启动 rvpnkit-agent。",
             chosen.label()
         );
-        std::process::exit(3);
+        eprintln!("界面仍会启动，服务恢复后点击刷新即可重试。");
     }
     let _ = BACKEND.set(chosen);
     let backend_label = backend().label();
@@ -171,14 +166,20 @@ fn main() {
         open_url(&url);
     }
 
-    let shared = Arc::new(());
+    let shared = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
+                if shared.fetch_add(1, Ordering::AcqRel) >= 16 {
+                    shared.fetch_sub(1, Ordering::AcqRel);
+                    let mut s = s;
+                    let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
                 let sh = Arc::clone(&shared);
                 std::thread::spawn(move || {
-                    let _ = sh; // 目前无共享可变状态，保留以便将来加缓存
                     handle(s);
+                    sh.fetch_sub(1, Ordering::AcqRel);
                 });
             }
             Err(_) => continue,
@@ -205,107 +206,114 @@ fn open_url(url: &str) {
 
 // ───────────────────────────────────────────────────── HTTP 小框架
 
-struct Request {
-    method: String,
-    path: String,
-    query: String,
-    body: String,
-}
-
 fn handle(mut stream: TcpStream) {
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-
-    let mut reader = BufReader::new(match stream.try_clone() {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let clone = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
-    });
-
-    // 请求行
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
-    }
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("GET").to_string();
-    let target = parts.next().unwrap_or("/").to_string();
-
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.clone(), String::new()),
     };
-
-    // 头
-    let mut content_length = 0usize;
-    loop {
-        let mut h = String::new();
-        if reader.read_line(&mut h).is_err() {
-            return;
-        }
-        let h = h.trim_end();
-        if h.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = h.split_once(':') {
-            if k.eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-
-    // 体
-    let mut body = String::new();
-    if content_length > 0 {
-        let mut buf = vec![0u8; content_length];
-        if reader.read_exact(&mut buf).is_err() {
-            return;
-        }
-        body = String::from_utf8_lossy(&buf).to_string();
-    }
-
-    let req = Request {
-        method,
-        path,
-        query,
-        body,
+    let (status, ctype, payload) = match http::read_request(&mut BufReader::new(clone)) {
+        Ok(req) => route(&req),
+        Err((status, message)) => json_err(status, message),
     };
-
-    let (status, ctype, payload) = route(&req);
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         409 => "Conflict",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
-        _ => "OK",
+        _ => "Error",
     };
-
-    let mut out = Vec::new();
-    let _ = write!(
-        out,
-        "HTTP/1.1 {status} {status_text}\r\n\
-         Content-Type: {ctype}\r\n\
-         Content-Length: {}\r\n\
-         Cache-Control: no-store\r\n\
-         Connection: close\r\n\r\n",
-        payload.len()
-    );
-    out.extend_from_slice(&payload);
-    let _ = stream.write_all(&out);
-    let _ = stream.flush();
+    let headers = format!("HTTP/1.1 {status} {status_text}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n", payload.len());
+    let _ = stream
+        .write_all(headers.as_bytes())
+        .and_then(|_| stream.write_all(&payload));
 }
 
 fn json_ok(data: serde_json::Value) -> (u16, &'static str, Vec<u8>) {
     let v = serde_json::json!({ "ok": true, "data": data });
-    (200, "application/json; charset=utf-8", v.to_string().into_bytes())
+    (
+        200,
+        "application/json; charset=utf-8",
+        v.to_string().into_bytes(),
+    )
 }
 
 fn json_err(status: u16, msg: impl Into<String>) -> (u16, &'static str, Vec<u8>) {
     let v = serde_json::json!({ "ok": false, "error": msg.into() });
-    (status, "application/json; charset=utf-8", v.to_string().into_bytes())
+    (
+        status,
+        "application/json; charset=utf-8",
+        v.to_string().into_bytes(),
+    )
 }
 
 fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
+    if req.method == "GET" {
+        match req.path.as_str() {
+            "/" => return (200, "text/html; charset=utf-8", UI.as_bytes().to_vec()),
+            "/assets/ui.css" => {
+                return (
+                    200,
+                    "text/css; charset=utf-8",
+                    include_bytes!("ui.css").to_vec(),
+                )
+            }
+            "/assets/ui.js" => {
+                return (
+                    200,
+                    "application/javascript; charset=utf-8",
+                    include_bytes!("ui.js").to_vec(),
+                )
+            }
+            "/health" => return json_ok(serde_json::json!({"version": env!("CARGO_PKG_VERSION")})),
+            _ => {}
+        }
+    }
+    if !req.path.starts_with("/api/") {
+        return json_err(404, "未找到接口");
+    }
+    if matches!(backend(), Backend::Demo) {
+        return match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "/api/state") => json_ok(rvpn_core::presentation::state_json(
+                &rvpn_core::presentation::demo_state(),
+                false,
+                true,
+            )),
+            ("GET", "/api/public") => {
+                let search = req
+                    .query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("search="))
+                    .map(urldecode)
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let names: Vec<_> = [
+                    "Minecraft · 像素之旅",
+                    "Terraria · 新世界",
+                    "周末游戏同好会",
+                ]
+                .into_iter()
+                .filter(|s| s.to_lowercase().contains(&search))
+                .collect();
+                json_ok(serde_json::json!({"networks": names, "demo":true}))
+            }
+            ("POST", _) => json_err(403, "演示模式禁止写入真实服务"),
+            _ => json_err(404, "未找到接口"),
+        };
+    }
+    let _gate = if matches!(backend(), Backend::Pipe) {
+        Some(PIPE_GATE.lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        None
+    };
+
     // HTTP 后端：除首页外整条路径原样转发给远程 agent。
     // agent 的响应本来就是同一套 {"ok":..,"data":..} 信封，直接透传即可。
     if matches!(backend(), Backend::Http { .. }) {
@@ -315,7 +323,11 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
         let target = if req.query.is_empty() {
             req.path.clone()
         } else {
-            format!("{}?{}", req.path, req.query)
+            format!(
+                "{}?{}",
+                req.path,
+                req.query.replace("refresh=1", "refresh=true")
+            )
         };
         let result = if req.method == "POST" {
             backend::http_post(backend(), &target, &req.body)
@@ -323,7 +335,46 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
             backend::http_get(backend(), &target)
         };
         return match result {
-            Ok((status, body)) => (status, "application/json; charset=utf-8", body.into_bytes()),
+            Ok((status, body)) => {
+                let mut value = match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(v) => v,
+                    Err(_) => return json_err(502, "agent 返回的不是 JSON"),
+                };
+                if req.path == "/api/state" {
+                    if let Some(data) = value.get_mut("data") {
+                        data["demo"] = serde_json::json!(false);
+                        if let Some(me) = data.get_mut("self").and_then(|v| v.as_object_mut()) {
+                            if let Some(id) = me.get("nodeId").and_then(|id| id.as_u64()) {
+                                me.insert("nodeId".into(), serde_json::json!(id.to_string()));
+                            }
+                        }
+                        if let Some(nets) = data.get_mut("networks").and_then(|n| n.as_array_mut())
+                        {
+                            for net in nets {
+                                if let Some(n) = net.as_object_mut() {
+                                    n.remove("token");
+                                }
+                                if let Some(members) =
+                                    net.get_mut("members").and_then(|m| m.as_array_mut())
+                                {
+                                    for member in members {
+                                        if let Some(id) =
+                                            member.get("nodeId").and_then(|id| id.as_u64())
+                                        {
+                                            member["nodeId"] = serde_json::json!(id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                (
+                    status,
+                    "application/json; charset=utf-8",
+                    value.to_string().into_bytes(),
+                )
+            }
             Err(e) => json_err(502, format!("转发到 agent 失败：{e}")),
         };
     }
@@ -353,53 +404,45 @@ fn read_snapshot() -> Result<(SnapshotState, bool), String> {
 }
 
 fn send(frame: Vec<u8>) -> Result<u32, String> {
+    let records = rvpn_core::Wire::parse(&frame);
+    let code = records
+        .iter()
+        .find(|r| r.field == 0 && r.ty == 1)
+        .map(|r| r.as_u32())
+        .ok_or("命令缺少类型")?;
+    if [5, 6, 8, 10, 14, 15, 16, 17].contains(&code) {
+        let (state, _) = read_snapshot()?;
+        rvpn_core::permissions::authorize(&frame, &state)?;
+    }
+    *STATE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let rid = rvpn_core::Wire::request_id(&frame);
     let mut pipe = PipeClient::connect(DEFAULT_PIPE).map_err(|e| e.to_string())?;
     if !pipe.can_write() {
-        return Err("当前为只读连接，无法下发命令。若运行在受限环境（Low 完整性），\
+        return Err(
+            "当前为只读连接，无法下发命令。若运行在受限环境（Low 完整性），\
                     请用普通用户身份直接启动本程序。"
-            .into());
+                .into(),
+        );
     }
-    pipe.send(&frame).map_err(|e| e.to_string())?;
+    pipe.transact(&frame, Duration::from_secs(8))
+        .map_err(|e| e.to_string())?;
     Ok(rid)
 }
 
 fn api_state(query: &str) -> (u16, &'static str, Vec<u8>) {
-    let refresh = query.split('&').any(|kv| kv == "refresh=1");
-    let _ = refresh; // 目前每次都重读，没有缓存
+    let mut cache = STATE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if !query.split('&').any(|kv| kv == "refresh=1") {
+        if let Some((at, value)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(2) {
+                return json_ok(value.clone());
+            }
+        }
+    }
     match read_snapshot() {
         Ok((st, can_write)) => {
-            let nets: Vec<serde_json::Value> = st
-                .networks
-                .iter()
-                .map(|n| {
-                    serde_json::json!({
-                        "name": n.name,
-                        "guid": n.guid_hex(),
-                        "token": n.token,
-                        "role": n.role,
-                        "members": n.members.iter().map(|m| serde_json::json!({
-                            "nodeId": m.node_id,
-                            "alias": m.alias,
-                            "publicIp": m.public_ip,
-                        })).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-
-            json_ok(serde_json::json!({
-                "canWrite": can_write,
-                "self": st.me.as_ref().map(|m| serde_json::json!({
-                    "nodeId": m.node_id,
-                    "alias": m.alias,
-                    "publicIp": m.public_ip,
-                    "virtualIp": m.virtual_ip,
-                })),
-                "networkCount": st.networks.len(),
-                "memberCount": st.member_count(),
-                "nodeCount": st.nodes.len(),
-                "networks": nets,
-            }))
+            let value = rvpn_core::presentation::state_json(&st, can_write, false);
+            *cache = Some((std::time::Instant::now(), value.clone()));
+            json_ok(value)
         }
         Err(e) => json_err(502, format!("读取快照失败：{e}")),
     }
@@ -441,11 +484,26 @@ fn body_str(body: &str, key: &str) -> Option<String> {
     v.get(key)?.as_str().map(|s| s.to_string())
 }
 
+fn password_field(body: &str) -> Result<String, &'static str> {
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|_| "请求体必须为 JSON")?;
+    let password = match value.get("password") {
+        None => "",
+        Some(serde_json::Value::String(password)) => password,
+        _ => return Err("password 必须为字符串"),
+    };
+    if password.encode_utf16().count() > 256 {
+        return Err("密码过长");
+    }
+    Ok(password.to_owned())
+}
+
 fn api_power(body: &str) -> (u16, &'static str, Vec<u8>) {
     let on = serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("on").and_then(|x| x.as_bool()))
-        .unwrap_or(true);
+        .and_then(|v| v.get("on").and_then(|x| x.as_bool()));
+    let Some(on) = on else {
+        return json_err(400, "on 必须为布尔值");
+    };
     match send(Commands::switch_power(on, next_request_id())) {
         Ok(rid) => json_ok(serde_json::json!({ "requestId": rid, "power": on })),
         Err(e) => json_err(409, e),
@@ -456,8 +514,11 @@ fn api_alias(body: &str) -> (u16, &'static str, Vec<u8>) {
     let Some(alias) = body_str(body, "alias") else {
         return json_err(400, "缺少 alias");
     };
-    if alias.trim().is_empty() {
-        return json_err(400, "alias 不能为空");
+    if alias.trim().is_empty()
+        || alias.encode_utf16().count() > 64
+        || alias.chars().any(char::is_control)
+    {
+        return json_err(400, "alias 须为 1–64 字符且不含控制字符");
     }
     match send(Commands::change_alias(alias.trim(), next_request_id())) {
         Ok(rid) => json_ok(serde_json::json!({ "requestId": rid, "alias": alias })),
@@ -469,7 +530,18 @@ fn api_join(body: &str) -> (u16, &'static str, Vec<u8>) {
     let Some(name) = body_str(body, "name") else {
         return json_err(400, "缺少 name");
     };
-    let password = body_str(body, "password").unwrap_or_default();
+    if let Err(error) = rvpn_core::operation::validate_name(name.trim()) {
+        return json_err(400, error);
+    }
+    let password = match password_field(body) {
+        Ok(password) => password,
+        Err(error) => return json_err(400, error),
+    };
+    if !password.is_empty() {
+        if let Err(error) = rvpn_core::operation::validate_password(&password) {
+            return json_err(400, error);
+        }
+    }
     let frame = if password.is_empty() {
         Commands::join_network(name.trim(), next_request_id())
     } else {
@@ -487,12 +559,20 @@ fn api_create(body: &str) -> (u16, &'static str, Vec<u8>) {
     let Some(name) = body_str(body, "name") else {
         return json_err(400, "缺少 name");
     };
-    let password = body_str(body, "password").unwrap_or_default();
-    let frame = if password.is_empty() {
-        Commands::create_network(name.trim(), next_request_id(), None)
-    } else {
-        Commands::create_network_with_password(name.trim(), &password, next_request_id())
+    if let Err(error) = rvpn_core::operation::validate_name(name.trim()) {
+        return json_err(400, error);
+    }
+    let password = match password_field(body) {
+        Ok(password) => password,
+        Err(error) => return json_err(400, error),
     };
+    if let Err(error) = rvpn_core::operation::validate_password(&password) {
+        return json_err(400, error);
+    }
+    if body_str(body, "confirmPassword").as_deref() != Some(password.as_str()) {
+        return json_err(400, "两次密码输入不一致");
+    }
+    let frame = Commands::create_network_with_password(name.trim(), &password, next_request_id());
     match send(frame) {
         Ok(rid) => json_ok(serde_json::json!({
             "requestId": rid, "created": name, "withPassword": !password.is_empty()
@@ -512,10 +592,13 @@ fn api_network_op(path: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
         _ => return json_err(400, "guid 需要是 32 位十六进制"),
     };
 
-    if parts.len() >= 2 && parts[1] == "members" && parts.len() >= 4 {
+    if parts.len() != 2 && !(parts.len() == 4 && parts[1] == "members") {
+        return json_err(404, "未知网络操作路径");
+    }
+    if parts.len() == 4 {
         let node_id: u64 = match parts[2].parse() {
-            Ok(n) => n,
-            Err(_) => return json_err(400, "nodeId 需要是数字"),
+            Ok(n) if n > 0 => n,
+            _ => return json_err(400, "nodeId 需要是正整数"),
         };
         let op = parts[3];
         let code = match op {
@@ -547,8 +630,10 @@ fn api_network_op(path: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
         "enabled" => {
             let on = serde_json::from_str::<serde_json::Value>(body)
                 .ok()
-                .and_then(|v| v.get("enabled").and_then(|x| x.as_bool()))
-                .unwrap_or(true);
+                .and_then(|v| v.get("enabled").and_then(|x| x.as_bool()));
+            let Some(on) = on else {
+                return json_err(400, "enabled 必须为布尔值");
+            };
             Commands::set_network_enabled(&guid, on, next_request_id())
         }
         _ => return json_err(404, format!("未知操作 {op}")),
@@ -561,44 +646,80 @@ fn api_network_op(path: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
 }
 
 fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
-    let s: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if s.len() % 2 != 0 {
+    if s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    s.as_bytes()
+        .chunks_exact(2)
+        .map(|p| {
+            std::str::from_utf8(p)
+                .ok()
+                .and_then(|p| u8::from_str_radix(p, 16).ok())
+        })
         .collect()
 }
-
 fn urldecode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
                     out.push(b);
                     i += 3;
                     continue;
                 }
-                out.push(bytes[i]);
-                i += 1;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
             }
         }
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
     }
-    String::from_utf8_lossy(&out).to_string()
+    String::from_utf8_lossy(&out).into_owned()
 }
-
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn invalid_commands_do_not_reach_the_service() {
+        assert_eq!(api_power("{}").0, 400);
+        assert_eq!(api_alias(r#"{"alias":"  "}"#).0, 400);
+        assert_eq!(api_join(r#"{"name":""}"#).0, 400);
+        assert_eq!(api_create(r#"{"name":"test","password":123}"#).0, 400);
+        assert_eq!(
+            api_network_op(
+                "/api/networks/00112233445566778899aabbccddeeff/leave/extra",
+                "{}"
+            )
+            .0,
+            404
+        );
+        assert_eq!(
+            api_network_op(
+                "/api/networks/00112233445566778899aabbccddeeff/members/0/kick",
+                "{}"
+            )
+            .0,
+            400
+        );
+    }
+    #[test]
+    fn strict_guid() {
+        assert_eq!(
+            hex_to_bytes("00112233445566778899aabbccddeeff")
+                .unwrap()
+                .len(),
+            16
+        );
+        assert!(hex_to_bytes("junk00112233445566778899aabbccddeeff").is_none());
+        assert!(hex_to_bytes("中").is_none());
+    }
+    #[test]
+    fn decode_handles_malformed_unicode() {
+        assert_eq!(urldecode("%E4%B8%AD+abc"), "中 abc");
+        assert_eq!(urldecode("%中%GG%"), "%中%GG%");
+    }
+}
 // ───────────────────────────────────────────────────── 界面
 
 const UI: &str = include_str!("ui.html");

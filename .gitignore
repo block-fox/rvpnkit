@@ -36,3 +36,4 @@ rust/target/
 rust/.cargo/registry/
 dist/*.zip
 dist/RvpnKit-*/
+.local-audit/

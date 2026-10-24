@@ -2118,7 +2118,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rvpn-core"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2126,17 +2126,20 @@ dependencies = [
 
 [[package]]
 name = "rvpn-gui"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "image",
  "rvpn-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "rvpn-web"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "rvpn-core",
  "serde_json",

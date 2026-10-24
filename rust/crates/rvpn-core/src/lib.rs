@@ -1,4 +1,4 @@
-﻿//! # rvpn-core
+//! # rvpn-core
 //!
 //! Radmin VPN 控制协议的纯 Rust 实现：帧编解码、命令构造、快照解析。
 //!
@@ -20,13 +20,19 @@
 //! 发送时最外层还要再套一个 `u32 LE` 长度前缀（由传输层负责）。
 
 pub mod commands;
+pub mod desktop;
+pub mod operation;
+pub mod permissions;
 pub mod pipe;
+pub mod presentation;
 pub mod snapshot;
 pub mod wire;
 
 pub use commands::{CommandCode, Commands};
 pub use snapshot::{MemberInfo, NetworkInfo, PublicNetworks, SelfInfo, SnapshotState};
-pub use wire::{decode_string, encode_string, field, looks_like_frame, tag, Frame, Record, RecordType, Wire};
+pub use wire::{
+    decode_string, encode_string, field, looks_like_frame, tag, Frame, Record, RecordType, Wire,
+};
 
 /// 默认管道路径。
 pub const DEFAULT_PIPE: &str = r"\\.\pipe\RadminVpnGuiChannel";

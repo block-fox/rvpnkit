@@ -1,379 +1,316 @@
-//! 快照解析。
-//!
-//! 快照是「多帧拼接」：每帧 `[u32 LE 长度][正文]`，正文是记录流。
-//!
-//! ## 关键结构（实测）
-//!
-//! 网络和成员档案**不在同一棵子树里**，需要靠节点 ID 关联：
-//!
-//! ```text
-//! 网络      容器 field 0x23
-//!              field 0x09 (type 0x0d) 16 字节 GUID
-//!              field 0x06 名字    field 0x47 token
-//!              field 0x24 容器 × N   ← 成员，每个含 field 0xe1 节点 ID
-//!
-//! 成员档案  容器 field 0x22
-//!              field 0xe1 节点 ID / field 0x04 别名 / field 0xc9 公网 IP
-//!
-//! 本机      容器 field 0x20 顶层的 field 0xe1 + 0x04 + 0xc9
-//! ```
-//!
-//! 所以：网络 → 子容器里的节点 ID（结构性，可靠）→ 再按节点 ID 合并档案。
-
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
-
+//! Typed service snapshots, audited against the installed 2.1.4951.1 serializer.
 use crate::wire::{field, Record, RecordType, Wire};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    net::{Ipv4Addr, Ipv6Addr},
+};
 
-const F_CONTAINER_NETWORK: u8 = 0x23;
-const F_CONTAINER_MEMBER: u8 = 0x24;
-const F_CONTAINER_PROFILE: u8 = 0x22;
-
-/// 一个 Radmin 网络。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NetworkInfo {
-    /// 网络名。
     pub name: String,
-    /// 16 字节网络标识。
     pub guid: Vec<u8>,
-    /// 快照字段 `0x47` 的字符串。含义未确认：多个网络取值相同，且其中多数是免密码
-    /// 加入的，所以大概率不是密码，更像某种会话令牌。
+    #[serde(skip_serializing)]
     pub token: Option<String>,
-    /// 我在这个网络里的角色。实测：`2` = 管理员（我是创建者），`1` = 普通成员。
-    /// 这是快照里唯一一个能反映角色的字段（字段号 `0x0a`）。
+    /// Local membership role, never the network's type field.
     pub role: Option<u32>,
-    /// 该网络下的成员。
+    pub network_type: Option<u32>,
+    pub flags: Option<u32>,
+    pub enabled: Option<bool>,
+    pub block_new_members: Option<bool>,
+    pub allow_passwordless: Option<bool>,
+    pub community: Option<String>,
     pub members: Vec<MemberInfo>,
 }
-
 impl NetworkInfo {
-    /// GUID 的十六进制表示（无连字符）。
     pub fn guid_hex(&self) -> String {
         self.guid.iter().map(|b| format!("{b:02x}")).collect()
     }
-}
-
-/// 网络成员。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberInfo {
-    /// 节点 ID，踢人/授管等命令要用。
-    pub node_id: u64,
-    /// 对方别名。
-    pub alias: Option<String>,
-    /// 对方公网出口 IP。
-    pub public_ip: Option<String>,
-}
-
-impl MemberInfo {
-    /// 便于显示的标签。
-    pub fn label(&self) -> String {
-        match (&self.alias, &self.public_ip) {
-            (Some(a), _) if !a.is_empty() => a.clone(),
-            (_, Some(ip)) if !ip.is_empty() => ip.clone(),
-            _ => format!("#{}", self.node_id),
-        }
+    pub fn can_manage(&self) -> bool {
+        self.role == Some(2)
     }
 }
 
-/// 本机信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelfInfo {
-    /// 本机节点 ID。
-    pub node_id: u64,
-    /// 本机别名。
-    pub alias: Option<String>,
-    /// 本机公网出口 IP。
-    pub public_ip: Option<String>,
-    /// 本机的虚拟 IPv4（快照里 26.x 的那一个）。
-    ///
-    /// 实测只有**本机**会带这个值；其他成员的虚拟 IP 不在控制面快照里。
-    pub virtual_ip: Option<String>,
-}
-
-/// 解析出来的整体状态。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SnapshotState {
-    /// 本机信息。
-    pub me: Option<SelfInfo>,
-    /// 已加入的网络。
-    pub networks: Vec<NetworkInfo>,
-    /// 快照里出现过的所有节点 ID。
-    pub nodes: Vec<u64>,
+#[serde(default)]
+pub struct MemberInfo {
+    pub node_id: u64,
+    pub alias: Option<String>,
+    pub public_ip: Option<String>,
+    pub virtual_ip: Option<String>,
+    pub virtual_ipv6: Option<String>,
+    pub role: Option<u32>,
+    pub connection_status: Option<u32>,
+    pub channel_type: Option<u32>,
+    pub latency_ms: Option<u32>,
+    pub product_version: Option<String>,
 }
-
+impl MemberInfo {
+    pub fn label(&self) -> String {
+        self.alias
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .or(self.virtual_ip.as_ref())
+            .or(self.public_ip.as_ref())
+            .cloned()
+            .unwrap_or_else(|| format!("#{}", self.node_id))
+    }
+    pub fn online(&self) -> Option<bool> {
+        match self.connection_status {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        }
+    }
+    pub fn status_text(&self) -> &'static str {
+        match self.online() {
+            Some(true) => "在线",
+            Some(false) => "离线",
+            None => "未知",
+        }
+    }
+    pub fn role_text(&self) -> &'static str {
+        match self.role {
+            Some(0) => "无权限",
+            Some(1) => "成员",
+            Some(2) => "管理员",
+            Some(3) => "申请人",
+            _ => "未知",
+        }
+    }
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SelfInfo {
+    pub node_id: u64,
+    pub alias: Option<String>,
+    pub public_ip: Option<String>,
+    pub virtual_ip: Option<String>,
+    pub virtual_ipv6: Option<String>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SnapshotState {
+    pub me: Option<SelfInfo>,
+    pub networks: Vec<NetworkInfo>,
+    pub nodes: Vec<u64>,
+    pub power: Option<bool>,
+    pub service_state: Option<u32>,
+}
+fn scalar(records: &[Record], id: u8) -> Option<u32> {
+    records
+        .iter()
+        .find(|r| r.field == id && matches!(r.ty, 1 | 11) && r.payload.len() == 4)
+        .map(Record::as_u32)
+}
+fn text(records: &[Record], id: u8) -> Option<String> {
+    records
+        .iter()
+        .find(|r| r.field == id && r.ty == 3)
+        .and_then(Record::as_string)
+}
+fn node(records: &[Record]) -> Option<u64> {
+    records
+        .iter()
+        .find(|r| r.field == field::NODE_ID && r.ty == 2 && r.payload.len() == 8)
+        .map(Record::as_u64)
+        .filter(|id| *id != 0)
+}
+fn addresses(records: &[Record]) -> (Option<String>, Option<String>) {
+    let v4 = scalar(records, 5)
+        .map(Ipv4Addr::from)
+        .filter(|ip| !ip.is_unspecified())
+        .map(|ip| ip.to_string());
+    let v6 = records
+        .iter()
+        .find(|r| r.field == 5 && r.ty == 9 && r.payload.len() == 16)
+        .and_then(|r| <[u8; 16]>::try_from(r.payload.as_slice()).ok())
+        .map(Ipv6Addr::from)
+        .filter(|ip| !ip.is_unspecified())
+        .map(|ip| ip.to_string());
+    (v4, v6)
+}
 impl SnapshotState {
-    /// 所有网络的成员总数。
     pub fn member_count(&self) -> usize {
         self.networks.iter().map(|n| n.members.len()).sum()
     }
-
-    /// 解析快照。
     pub fn parse(raw: &[u8]) -> Self {
-        let mut networks: Vec<(String, Vec<u8>, Option<String>, Option<u32>, Vec<u64>)> = Vec::new();
-        let mut profiles: HashMap<u64, (Option<String>, Option<String>)> = HashMap::new();
-        let mut nodes: BTreeSet<u64> = BTreeSet::new();
-        let mut me: Option<SelfInfo> = None;
-
+        let mut result = Self::default();
+        let mut profiles = HashMap::<u64, MemberInfo>::new();
         let mut frames = Wire::split_frames(raw);
         if frames.is_empty() {
             frames.push(raw.to_vec());
         }
-
-        for frame in &frames {
-            walk(
-                &Wire::parse(frame),
-                &mut networks,
-                &mut profiles,
-                &mut nodes,
-                &mut me,
-                0,
-            );
+        for frame in frames {
+            collect(&Wire::parse(&frame), &mut result, &mut profiles);
         }
-
+        let local_id = result.me.as_ref().map(|me| me.node_id);
+        let mut ids = BTreeSet::new();
+        if let Some(id) = local_id {
+            ids.insert(id);
+        }
         let mut seen = HashSet::new();
-        let nets = networks
-            .into_iter()
-            .filter(|(name, guid, _, _, _)| seen.insert((name.clone(), guid.clone())))
-            .map(|(name, guid, token, role, member_ids)| {
-                let members = member_ids
-                    .into_iter()
-                    .map(|id| {
-                        let p = profiles.get(&id);
-                        MemberInfo {
-                            node_id: id,
-                            alias: p.and_then(|x| x.0.clone()),
-                            public_ip: p.and_then(|x| x.1.clone()),
-                        }
-                    })
-                    .collect();
-                NetworkInfo {
-                    name,
-                    guid,
-                    token,
-                    role,
-                    members,
+        result.networks.retain(|n| seen.insert(n.guid.clone()));
+        for network in &mut result.networks {
+            for member in &mut network.members {
+                ids.insert(member.node_id);
+                if let Some(profile) = profiles.get(&member.node_id) {
+                    let role = member.role;
+                    *member = profile.clone();
+                    member.role = role;
                 }
-            })
-            .collect();
-
-        Self {
-            me,
-            networks: nets,
-            nodes: nodes.into_iter().collect(),
+                if Some(member.node_id) == local_id {
+                    network.role = member.role;
+                }
+            }
         }
+        ids.extend(profiles.keys());
+        result.nodes = ids.into_iter().collect();
+        result
     }
 }
-
-fn walk(
+fn collect(
     records: &[Record],
-    networks: &mut Vec<(String, Vec<u8>, Option<String>, Option<u32>, Vec<u64>)>,
-    profiles: &mut HashMap<u64, (Option<String>, Option<String>)>,
-    nodes: &mut BTreeSet<u64>,
-    me: &mut Option<SelfInfo>,
-    depth: usize,
+    result: &mut SnapshotState,
+    profiles: &mut HashMap<u64, MemberInfo>,
 ) {
-    // 先把这一层的标量字段聚起来（可能属于本机条目）
-    let mut local_node: Option<u64> = None;
-    let mut local_alias: Option<String> = None;
-    let mut local_ip: Option<String> = None;
-    let mut local_virtual_ip: Option<String> = None;
-
-    for r in records {
-        if r.ty == RecordType::Str as u8 {
-            if let Some(s) = r.as_string() {
-                if s.len() <= 256 {
-                    if r.field == field::ALIAS {
-                        // 字段 0x04 有两种含义：本机条目里放的是虚拟 IPv4（26.x），
-                        // 成员档案里放的是别名。靠「长得像不像 IPv4」区分。
-                        if looks_like_ipv4(&s) {
-                            local_virtual_ip.get_or_insert(s);
-                        } else {
-                            local_alias.get_or_insert(s);
-                        }
-                    } else if r.field == field::PUBLIC_IP {
-                        local_ip.get_or_insert(s);
+    for record in records {
+        let Some(children) = record.children.as_ref() else {
+            continue;
+        };
+        match record.field {
+            0x20 => {
+                if let Some(node_id) = node(children) {
+                    let (mut virtual_ip, virtual_ipv6) = addresses(children);
+                    let alias = text(children, 4);
+                    if virtual_ip.is_none() {
+                        virtual_ip = alias
+                            .as_ref()
+                            .and_then(|s| s.parse::<Ipv4Addr>().ok())
+                            .map(|ip| ip.to_string());
                     }
+                    result.me = Some(SelfInfo {
+                        node_id,
+                        alias,
+                        public_ip: text(children, 0xc9),
+                        virtual_ip,
+                        virtual_ipv6,
+                    });
+                }
+                result.power = scalar(children, 0x11).and_then(|v| match v {
+                    0 => Some(false),
+                    1 => Some(true),
+                    _ => None,
+                });
+                result.service_state = scalar(children, 0x12);
+                collect(children, result, profiles);
+            }
+            0x22 => {
+                if let Some(node_id) = node(children) {
+                    let (virtual_ip, virtual_ipv6) = addresses(children);
+                    profiles.insert(
+                        node_id,
+                        MemberInfo {
+                            node_id,
+                            alias: text(children, 4),
+                            public_ip: text(children, 0xc9),
+                            virtual_ip,
+                            virtual_ipv6,
+                            product_version: text(children, 0xed),
+                            connection_status: scalar(children, 0x21).filter(|v| *v != u32::MAX),
+                            channel_type: scalar(children, 0x26),
+                            latency_ms: scalar(children, 0x3e).filter(|v| *v != u32::MAX),
+                            ..Default::default()
+                        },
+                    );
                 }
             }
-        }
-        if r.ty == RecordType::NodeId as u8 && r.field == field::NODE_ID && r.payload.len() == 8 {
-            let id = r.as_u64();
-            if id != 0 {
-                local_node.get_or_insert(id);
-                nodes.insert(id);
-            }
-        }
-    }
-
-    if depth <= 1 && me.is_none() {
-        if let Some(id) = local_node {
-            *me = Some(SelfInfo {
-                node_id: id,
-                alias: local_alias.clone(),
-                public_ip: local_ip.clone(),
-                virtual_ip: local_virtual_ip.clone(),
-            });
-        }
-    }
-
-    for r in records {
-        let Some(children) = &r.children else { continue };
-        match r.field {
-            F_CONTAINER_NETWORK => parse_network(children, networks, nodes),
-            F_CONTAINER_PROFILE => parse_profile(children, profiles, nodes),
-            _ => walk(children, networks, profiles, nodes, me, depth + 1),
-        }
-    }
-}
-
-/// 判断字符串是否像一个 IPv4 地址。
-fn looks_like_ipv4(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    parts.len() == 4
-        && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u16>().is_ok())
-}
-
-fn parse_network(
-    children: &[Record],
-    networks: &mut Vec<(String, Vec<u8>, Option<String>, Option<u32>, Vec<u64>)>,
-    nodes: &mut BTreeSet<u64>,
-) {
-    let mut name: Option<String> = None;
-    let mut token: Option<String> = None;
-    let mut guid: Option<Vec<u8>> = None;
-    let mut members: Vec<u64> = Vec::new();
-    let mut role: Option<u32> = None;
-
-    for c in children {
-        if c.ty == RecordType::Guid as u8
-            && c.field == field::NETWORK_GUID
-            && c.payload.len() == 16
-        {
-            guid.get_or_insert(c.payload.clone());
-        }
-        if c.ty == RecordType::Str as u8 {
-            if let Some(s) = c.as_string() {
-                if c.field == field::NETWORK_NAME {
-                    name.get_or_insert(s);
-                } else if c.field == field::NETWORK_TOKEN {
-                    token.get_or_insert(s);
-                }
-            }
-        }
-        if c.field == 0x0a && matches!(c.ty, 0x01 | 0x0b) && c.payload.len() >= 4 {
-            role = Some(c.as_u32());
-        }
-        if c.field == F_CONTAINER_MEMBER {
-            if let Some(grand) = &c.children {
-                for m in grand {
-                    if m.ty == RecordType::NodeId as u8
-                        && m.field == field::NODE_ID
-                        && m.payload.len() == 8
-                    {
-                        let id = m.as_u64();
-                        if id != 0 {
-                            members.push(id);
-                            nodes.insert(id);
+            0x23 => {
+                let guid = children
+                    .iter()
+                    .find(|r| r.field == 9 && r.ty == 13 && r.payload.len() == 16)
+                    .map(|r| r.payload.clone());
+                if let (Some(name), Some(guid)) = (text(children, 6), guid) {
+                    let flags = scalar(children, 0xa3);
+                    let mut network = NetworkInfo {
+                        name,
+                        guid,
+                        network_type: scalar(children, 10),
+                        flags,
+                        token: text(children, 0x47),
+                        community: text(children, 0x48),
+                        enabled: flags
+                            .map(|v| v & 1 != 0)
+                            .or_else(|| scalar(children, 8).map(|v| v != 0)),
+                        block_new_members: flags
+                            .map(|v| v & 2 != 0)
+                            .or_else(|| scalar(children, 0x23).map(|v| v != 0)),
+                        allow_passwordless: flags
+                            .map(|v| v & 4 != 0)
+                            .or_else(|| scalar(children, 0x3f).map(|v| v != 0)),
+                        ..Default::default()
+                    };
+                    let mut seen = HashSet::new();
+                    for entry in children.iter().filter(|r| r.field == 0x24) {
+                        if let Some(items) = &entry.children {
+                            if let Some(node_id) = node(items) {
+                                if seen.insert(node_id) {
+                                    network.members.push(MemberInfo {
+                                        node_id,
+                                        role: scalar(items, 10),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
                         }
                     }
+                    result.networks.push(network);
                 }
             }
+            _ => collect(children, result, profiles),
         }
-    }
-
-    if let (Some(name), Some(guid)) = (name, guid) {
-        networks.push((name, guid, token, role, members));
     }
 }
-
-fn parse_profile(
-    children: &[Record],
-    profiles: &mut HashMap<u64, (Option<String>, Option<String>)>,
-    nodes: &mut BTreeSet<u64>,
-) {
-    let mut node: Option<u64> = None;
-    let mut alias: Option<String> = None;
-    let mut ip: Option<String> = None;
-
-    for c in children {
-        if c.ty == RecordType::NodeId as u8 && c.field == field::NODE_ID && c.payload.len() == 8 {
-            let id = c.as_u64();
-            if id != 0 {
-                node.get_or_insert(id);
-                nodes.insert(id);
-            }
-        }
-        if c.ty == RecordType::Str as u8 {
-            if let Some(s) = c.as_string() {
-                if s.len() <= 128 {
-                    if c.field == field::ALIAS {
-                        alias.get_or_insert(s);
-                    } else if c.field == field::PUBLIC_IP {
-                        ip.get_or_insert(s);
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(id) = node {
-        profiles.entry(id).or_insert((alias, ip));
-    }
-}
-
-/// 从枚举响应里抽出公共网络名。
-///
-/// 公共网络列表不在「网络容器（0x23）」里，所以 [`SnapshotState::parse`] 看不到；
-/// 但它们的名字同样带字段 `0x06`，全量收集再减去已加入的即可。
 pub struct PublicNetworks;
-
 impl PublicNetworks {
-    /// 抽出响应里所有字段 `0x06` 的字符串（去重、保序）。
     pub fn extract_names(raw: &[u8]) -> Vec<String> {
+        fn visit(records: &[Record], out: &mut Vec<String>, seen: &mut HashSet<String>) {
+            for r in records {
+                if r.ty == RecordType::Str as u8 && r.field == field::NETWORK_NAME {
+                    if let Some(name) = r.as_string() {
+                        if !name.is_empty()
+                            && name.chars().count() <= 128
+                            && seen.insert(name.clone())
+                        {
+                            out.push(name);
+                        }
+                    }
+                }
+                if let Some(children) = &r.children {
+                    visit(children, out, seen);
+                }
+            }
+        }
+        let mut frames = Wire::split_frames(raw);
+        if frames.is_empty() {
+            frames.push(raw.to_vec());
+        }
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-
-        let mut frames = Wire::split_frames(raw);
-        if frames.is_empty() {
-            frames.push(raw.to_vec());
-        }
-        for frame in &frames {
-            visit(&Wire::parse(frame), &mut out, &mut seen);
+        for frame in frames {
+            visit(&Wire::parse(&frame), &mut out, &mut seen);
         }
         out
     }
-
-    /// 从全量名字里减去已加入的，得到可加入的公共网络。
     pub fn available(raw: &[u8], joined: &[String], search: Option<&str>) -> Vec<String> {
-        let joined: HashSet<&str> = joined.iter().map(|s| s.as_str()).collect();
-        let needle = search.map(|s| s.to_lowercase());
-
-        let mut out: Vec<String> = Self::extract_names(raw)
+        let needle = search.unwrap_or_default().to_lowercase();
+        let mut names: Vec<_> = Self::extract_names(raw)
             .into_iter()
-            .filter(|n| !joined.contains(n.as_str()))
-            .filter(|n| match &needle {
-                Some(k) if !k.is_empty() => n.to_lowercase().contains(k),
-                _ => true,
-            })
+            .filter(|n| !joined.contains(n) && n.to_lowercase().contains(&needle))
             .collect();
-
-        out.sort();
-        out.dedup();
-        out
-    }
-}
-
-fn visit(records: &[Record], out: &mut Vec<String>, seen: &mut HashSet<String>) {
-    for r in records {
-        if r.ty == RecordType::Str as u8 && r.field == field::NETWORK_NAME {
-            if let Some(s) = r.as_string() {
-                if !s.is_empty() && s.len() <= 128 && seen.insert(s.clone()) {
-                    out.push(s);
-                }
-            }
-        }
-        if let Some(children) = &r.children {
-            visit(children, out, seen);
-        }
+        names.sort();
+        names.dedup();
+        names
     }
 }

@@ -1,775 +1,734 @@
-﻿<!doctype html>
-<html lang="zh-CN" data-theme="dark">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RvpnKit · Radmin VPN</title>
-<style>
-/* ─────────────────────────── 主题变量 */
-:root[data-theme="dark"]{
-  --bg:#0f1115; --panel:#161a21; --panel2:#1b2029; --hover:#212734;
-  --border:#262d3a; --fg:#d7dee9; --muted:#8b95a7; --faint:#5d6675;
-  --accent:#5b8def; --accent-soft:#1e2c46;
-  --ok:#57c07a; --warn:#e0a458; --danger:#e06c75;
-  --shadow:0 16px 44px rgba(0,0,0,.55);
-  --sel:#24314b;
-}
-:root[data-theme="light"]{
-  --bg:#f4f6fa; --panel:#ffffff; --panel2:#eef1f6; --hover:#e8edf5;
-  --border:#dde3ec; --fg:#1e2430; --muted:#66707f; --faint:#9aa3b2;
-  --accent:#3b6fd4; --accent-soft:#e3ebfb;
-  --ok:#248a4a; --warn:#9a6a12; --danger:#c0392b;
-  --shadow:0 16px 40px rgba(30,40,60,.16);
-  --sel:#dce7fb;
-}
-*{box-sizing:border-box}
-html,body{height:100%}
-body{
-  margin:0; background:var(--bg); color:var(--fg);
-  font:14px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-  display:grid; grid-template-columns:200px 1fr; grid-template-rows:60px 1fr 28px;
-  grid-template-areas:"side top" "side main" "side status";
-  overflow:hidden; transition:background .18s,color .18s;
-}
-
-/* ─────────────────────────── 左侧栏 */
-aside{
-  grid-area:side; background:var(--panel); border-right:1px solid var(--border);
-  padding:20px 12px 14px; display:flex; flex-direction:column;
-}
-.brand{font-size:19px; font-weight:750; color:var(--accent); letter-spacing:.3px; padding:0 8px}
-.brand small{display:block; font-size:10.5px; color:var(--faint); font-weight:400; letter-spacing:0; margin-top:1px}
-.nav{margin-top:22px; display:flex; flex-direction:column; gap:2px}
-.nav button{
-  all:unset; cursor:pointer; padding:9px 10px; border-radius:8px; color:var(--muted);
-  font-size:13.5px; display:flex; align-items:center; gap:9px;
-  transition:background .12s,color .12s;
-}
-.nav button .ico{width:16px; text-align:center; opacity:.9; font-size:13px}
-.nav button:hover{background:var(--hover); color:var(--fg)}
-.nav button.on{background:var(--accent-soft); color:var(--accent); font-weight:600}
-.nav button .count{margin-left:auto; font-size:11px; color:var(--faint); font-weight:400}
-.nav button.on .count{color:var(--accent); opacity:.8}
-
-.side-foot{margin-top:auto; padding:10px 8px 0; font-size:11px; color:var(--faint); line-height:1.9}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px}
-.dot.ok{background:var(--ok)} .dot.ro{background:var(--warn)}
-
-/* ─────────────────────────── 顶栏 */
-header{
-  grid-area:top; background:var(--panel); border-bottom:1px solid var(--border);
-  display:flex; align-items:center; gap:12px; padding:0 20px;
-}
-.pill{
-  all:unset; cursor:pointer; display:flex; align-items:center; gap:7px;
-  padding:7px 14px; border-radius:20px; font-size:13px; font-weight:600;
-  border:1px solid var(--border); background:var(--panel2);
-  transition:background .12s,border-color .12s;
-}
-.pill .led{width:8px;height:8px;border-radius:50%}
-.pill.on{color:var(--ok)} .pill.on .led{background:var(--ok); box-shadow:0 0 8px var(--ok)}
-.pill.off{color:var(--muted)} .pill.off .led{background:var(--faint)}
-.pill:hover{background:var(--hover)}
-
-.btn{
-  all:unset; cursor:pointer; padding:7px 14px; border-radius:8px; font-size:13px;
-  border:1px solid var(--border); background:var(--panel2); color:var(--fg);
-  transition:background .12s,border-color .12s,opacity .12s; white-space:nowrap;
-}
-.btn:hover{background:var(--hover)}
-.btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
-.btn.primary:hover{filter:brightness(1.08)}
-.btn.danger{color:var(--danger); border-color:var(--border)}
-.btn.danger:hover{background:var(--hover)}
-.btn:disabled{opacity:.4; cursor:not-allowed}
-.btn.sm{padding:5px 11px; font-size:12px}
-
-.selfbox{margin-left:auto; display:flex; align-items:center; gap:12px; font-size:12.5px; color:var(--muted)}
-.selfbox b{color:var(--fg); font-weight:600}
-.selfbox .sep{width:1px;height:20px;background:var(--border)}
-
-/* ─────────────────────────── 主区 */
-main{grid-area:main; overflow:auto; padding:22px 24px}
-.page{display:none} .page.on{display:block; animation:fade .16s ease}
-@keyframes fade{from{opacity:0; transform:translateY(3px)} to{opacity:1; transform:none}}
-
-.ph{display:flex; align-items:baseline; gap:10px; margin-bottom:4px}
-.ph h2{margin:0; font-size:18px; font-weight:700}
-.ph .sub{font-size:12px; color:var(--faint)}
-.hint{color:var(--muted); font-size:12px; margin-bottom:16px}
-
-.card{
-  background:var(--panel); border:1px solid var(--border); border-radius:12px;
-  overflow:hidden;
-}
-.card + .card{margin-top:14px}
-.card-head{
-  padding:11px 16px; border-bottom:1px solid var(--border); font-size:12px;
-  color:var(--muted); display:flex; align-items:center; gap:10px; background:var(--panel2);
-}
-
-.toolbar{display:flex; gap:8px; align-items:center; margin-bottom:16px; flex-wrap:wrap}
-input[type=text],input[type=password]{
-  background:var(--panel2); border:1px solid var(--border); color:var(--fg);
-  padding:8px 12px; border-radius:8px; font-size:13px; outline:none; min-width:210px;
-  transition:border-color .12s, background .12s;
-}
-input:focus{border-color:var(--accent)}
-input::placeholder{color:var(--faint)}
-
-/* 表格 */
-table{width:100%; border-collapse:collapse; font-size:13px}
-thead th{
-  text-align:left; font-weight:500; color:var(--faint); font-size:11.5px;
-  padding:9px 14px; border-bottom:1px solid var(--border); letter-spacing:.3px;
-  background:var(--panel); position:sticky; top:0; z-index:1;
-}
-tbody tr{border-bottom:1px solid var(--border); transition:background .1s}
-tbody tr:last-child{border-bottom:0}
-tbody tr:hover{background:var(--hover)}
-tbody tr.sel{background:var(--sel)}
-tbody td{padding:9px 14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-td.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace; font-size:12px; color:var(--accent)}
-td.dim{color:var(--faint); font-size:12px}
-td.num{color:var(--muted); font-variant-numeric:tabular-nums}
-.chk{width:15px;height:15px; accent-color:var(--accent); cursor:pointer; vertical-align:-2px}
-.rowname{display:flex; align-items:center; gap:9px}
-.badge{
-  font-size:10.5px; padding:1px 7px; border-radius:20px; border:1px solid var(--border);
-  color:var(--faint); background:var(--panel2);
-}
-
-.empty{padding:38px 16px; text-align:center; color:var(--faint); font-size:13px}
-.empty .big{font-size:26px; display:block; margin-bottom:8px; opacity:.5}
-
-/* 批量操作条 */
-.batch{
-  display:none; align-items:center; gap:10px; padding:10px 16px;
-  border-bottom:1px solid var(--border); background:var(--accent-soft); font-size:13px;
-}
-.batch.on{display:flex}
-.batch .n{font-weight:600; color:var(--accent)}
-
-/* 右键菜单 */
-#menu{
-  position:fixed; z-index:99; background:var(--panel); border:1px solid var(--border);
-  border-radius:10px; padding:5px; min-width:180px; display:none; box-shadow:var(--shadow);
-}
-#menu .mt{
-  font-size:11px; color:var(--faint); padding:6px 11px 7px; border-bottom:1px solid var(--border);
-  margin-bottom:4px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-}
-#menu button{
-  all:unset; display:flex; align-items:center; gap:9px; width:100%; cursor:pointer;
-  padding:7px 11px; border-radius:6px; font-size:13px; color:var(--fg); box-sizing:border-box;
-}
-#menu button:hover{background:var(--hover)}
-#menu button.danger{color:var(--danger)}
-#menu button .k{margin-left:auto; font-size:11px; color:var(--faint)}
-#menu hr{border:0; border-top:1px solid var(--border); margin:4px 2px}
-
-/* 属性弹窗 */
-#modal{
-  position:fixed; inset:0; background:rgba(0,0,0,.42); display:none;
-  align-items:center; justify-content:center; z-index:120;
-}
-#modal.on{display:flex}
-.dialog{
-  background:var(--panel); border:1px solid var(--border); border-radius:14px;
-  width:430px; max-width:92vw; box-shadow:var(--shadow); overflow:hidden;
-}
-.dialog header{
-  display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--border);
-  background:var(--panel2); gap:10px; font-size:14px; font-weight:650;
-}
-.dialog header .x{margin-left:auto; cursor:pointer; color:var(--faint); font-size:16px; line-height:1}
-.dialog .body{padding:16px 18px; max-height:62vh; overflow:auto}
-.dlg-sec{font-size:11.5px; color:var(--accent); font-weight:600; margin:14px 0 7px; letter-spacing:.4px}
-.dlg-sec:first-child{margin-top:0}
-.kv{display:grid; grid-template-columns:96px 1fr; gap:6px 12px; font-size:13px}
-.kv dt{color:var(--muted)}
-.kv dd{margin:0; word-break:break-all}
-.kv dd.mono{font-family:ui-monospace,Consolas,monospace; font-size:12px}
-.unknown{color:var(--faint); font-style:italic}
-.dialog footer{padding:12px 18px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px; background:var(--panel2)}
-
-/* 状态栏 */
-footer{
-  grid-area:status; background:var(--panel); border-top:1px solid var(--border);
-  display:flex; align-items:center; padding:0 20px; font-size:11.5px; color:var(--faint); gap:16px;
-}
-.toast{
-  position:fixed; right:20px; bottom:44px; background:var(--panel); color:var(--fg);
-  border:1px solid var(--border); border-radius:10px; padding:11px 16px; font-size:13px;
-  opacity:0; transform:translateY(8px); transition:.18s; pointer-events:none;
-  max-width:440px; box-shadow:var(--shadow); z-index:200;
-}
-.toast.show{opacity:1; transform:none}
-.spin{animation:sp 1s linear infinite; display:inline-block}
-@keyframes sp{to{transform:rotate(360deg)}}
-
-/* 设置页 */
-.setting{display:flex; align-items:center; gap:14px; padding:14px 16px; border-bottom:1px solid var(--border)}
-.setting:last-child{border-bottom:0}
-.setting .lab{font-size:13px}
-.setting .lab small{display:block; color:var(--faint); font-size:11.5px; margin-top:2px}
-.setting .ctl{margin-left:auto; display:flex; gap:8px; align-items:center}
-.seg{display:flex; border:1px solid var(--border); border-radius:8px; overflow:hidden}
-.seg button{
-  all:unset; cursor:pointer; padding:6px 14px; font-size:12.5px; color:var(--muted);
-  background:var(--panel2);
-}
-.seg button.on{background:var(--accent); color:#fff}
-</style>
-</head>
-<body>
-
-<aside>
-  <div class="brand">RvpnKit<small>Radmin VPN 客户端</small></div>
-  <nav class="nav">
-    <button data-page="networks" class="on"><span class="ico">◈</span>网络<span class="count" id="cNet"></span></button>
-    <button data-page="members"><span class="ico">◇</span>成员<span class="count" id="cMem"></span></button>
-    <button data-page="public"><span class="ico">⊕</span>公共网络<span class="count" id="cPub"></span></button>
-    <button data-page="settings"><span class="ico">⚙</span>设置</button>
-  </nav>
-  <div class="side-foot">
-    <div id="backend"><span class="dot ok"></span>直连管道</div>
-    <div id="perm"></div>
-    <div style="margin-top:6px">右键行可操作</div>
-  </div>
-</aside>
-
-<header>
-  <button class="pill on" id="powerBtn"><span class="led"></span><span id="powerTxt">已开启</span></button>
-  <button class="btn" id="refreshBtn">刷新</button>
-  <div class="selfbox">
-    <span><b id="selfAlias">—</b></span>
-    <span class="sep"></span>
-    <span id="selfIp">—</span>
-    <span class="sep"></span>
-    <span id="selfVip" title="本机虚拟 IPv4">—</span>
-    <span id="spinner" style="width:14px"></span>
-  </div>
-</header>
-
-<main>
-  <!-- 网络 -->
-  <section class="page on" id="page-networks">
-    <div class="ph"><h2>网络</h2><span class="sub" id="netSub"></span></div>
-    <div class="hint">双击进入成员列表 · 右键行可执行操作</div>
-    <div class="toolbar">
-      <input type="text" id="joinName" placeholder="网络名">
-      <button class="btn primary" id="joinBtn">加入</button>
-      <button class="btn" id="createBtn">创建</button>
-    </div>
-    <div class="card">
-      <table>
-        <thead><tr><th style="width:52%">网络名</th><th style="width:14%">成员</th><th>GUID</th></tr></thead>
-        <tbody id="netBody"></tbody>
-      </table>
-      <div class="empty" id="netEmpty" style="display:none"><span class="big">◈</span>还没有加入任何网络</div>
-    </div>
-  </section>
-
-  <!-- 成员 -->
-  <section class="page" id="page-members">
-    <div class="ph"><h2>成员</h2><span class="sub" id="memNetName"></span></div>
-    <div class="hint">勾选可批量操作 · 右键或双击查看属性</div>
-    <div class="toolbar">
-      <input type="text" id="memFilter" placeholder="筛选别名 / IP / 节点 ID">
-      <button class="btn sm" id="memSelAll">全选</button>
-      <button class="btn sm" id="memSelNone">清空选择</button>
-    </div>
-    <div class="card">
-      <div class="batch" id="batchBar">
-        <span><span class="n" id="batchCount">0</span> 个已选</span>
-        <button class="btn sm" id="batchGrant">授权管理员</button>
-        <button class="btn sm" id="batchRevoke">撤销管理员</button>
-        <button class="btn sm danger" id="batchKick">踢出网络</button>
-        <button class="btn sm" id="batchCopy">复制节点 ID</button>
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>
+      RvpnKit · 让联机更简单
+    </title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23eb7950'/%3E%3Ctext x='10' y='29' font-family='sans-serif' font-size='28' fill='white'%3ER%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="/assets/ui.css">
+    <script defer src="/assets/ui.js">
+    </script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="#overview">
+        <span class="brand-mark">
+          R
+          <span>
+            ↗
+          </span>
+        </span>
+        <span>
+          RvpnKit
+          <small>
+            你的联机小管家
+          </small>
+        </span>
+      </a>
+      <div class="nav-label">
+        工作空间
       </div>
-      <table>
-        <thead><tr>
-          <th style="width:38px"><input type="checkbox" class="chk" id="memChkAll"></th>
-          <th style="width:120px" title="Radmin 内部的成员编号，踢人/授权时用它定位，不是 IP">节点 ID ⓘ</th>
-          <th style="width:38%">别名</th>
-          <th style="width:150px">公网 IP</th>
-          <th>虚拟 IP</th>
-        </tr></thead>
-        <tbody id="memBody"></tbody>
-      </table>
-      <div class="empty" id="memEmpty"><span class="big">◇</span>先在「网络」页选中一个网络</div>
-    </div>
-  </section>
-
-  <!-- 公共网络 -->
-  <section class="page" id="page-public">
-    <div class="ph"><h2>公共网络</h2><span class="sub" id="pubSub"></span></div>
-    <div class="hint">这里只列出可加入的网络；成员、踢人等操作在「成员」页</div>
-    <div class="toolbar">
-      <input type="text" id="q" placeholder="搜索：DOTA / Minecraft / Valorant …">
-      <button class="btn primary" id="searchBtn">搜索</button>
-      <button class="btn" id="joinSelBtn">加入选中</button>
-    </div>
-    <div class="card">
-      <table><thead><tr><th>网络名</th></tr></thead><tbody id="pubBody"></tbody></table>
-      <div class="empty" id="pubEmpty"><span class="big">⊕</span>点「搜索」从服务器拉取可加入的公共网络</div>
-    </div>
-  </section>
-
-  <!-- 设置 -->
-  <section class="page" id="page-settings">
-    <div class="ph"><h2>设置</h2></div>
-    <div class="hint">外观、别名与连接信息</div>
-
-    <div class="card">
-      <div class="setting">
-        <div class="lab">主题<small>浅色 / 深色，立即生效并记住选择</small></div>
-        <div class="ctl">
-          <div class="seg">
-            <button data-theme-set="light">浅色</button>
-            <button data-theme-set="dark">深色</button>
+      <nav aria-label="主导航">
+        <button data-page="overview">
+          <span data-icon="dashboard">
+          </span>
+          总览
+          <span class="nav-arrow">
+            ↗
+          </span>
+        </button>
+        <button data-page="networks">
+          <span data-icon="network">
+          </span>
+          我的网络
+          <span class="count" id="nav-networks">
+            0
+          </span>
+        </button>
+        <button data-page="members">
+          <span data-icon="users">
+          </span>
+          网络成员
+          <span class="count" id="nav-members">
+            0
+          </span>
+        </button>
+        <button data-page="public">
+          <span data-icon="compass">
+          </span>
+          发现网络
+        </button>
+      </nav>
+      <div class="nav-label">
+        偏好与工具
+      </div>
+      <nav aria-label="工具导航">
+        <button data-page="activity">
+          <span data-icon="activity">
+          </span>
+          活动记录
+        </button>
+        <button data-page="settings">
+          <span data-icon="settings">
+          </span>
+          设置
+        </button>
+      </nav>
+      <div class="side-note">
+        <span class="note-orbit">
+          ✳
+        </span>
+        <strong>
+          距离远一点，也能一起玩。
+        </strong>
+        <p>
+          管理网络，找到伙伴。
+          <br>
+          把时间留给下一场冒险。
+        </p>
+        <button class="btn side-discover" data-go="public">
+          去发现网络
+          <span>
+            ↗
+          </span>
+        </button>
+      </div>
+      <div class="side-status">
+        <i class="status-dot" id="side-dot">
+        </i>
+        <span id="side-status">
+          正在连接服务
+        </span>
+        <small>
+          v0.4.0 · 本地工作空间
+        </small>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="breadcrumb">
+          工作空间
+          <span>
+            /
+          </span>
+          <b id="breadcrumb">
+            总览
+          </b>
+        </div>
+        <div class="top-actions">
+          <span class="sync-label" id="sync-label">
+            等待同步
+          </span>
+          <button class="icon-btn" id="refresh" title="刷新状态 (R)" aria-label="刷新状态">
+            <span data-icon="refresh">
+            </span>
+          </button>
+          <button class="icon-btn" id="theme-toggle" title="切换主题" aria-label="切换主题">
+            <span data-icon="sun">
+            </span>
+          </button>
+          <div class="top-divider">
+          </div>
+          <span class="avatar self-avatar">
+            我
+          </span>
+          <span id="top-alias">
+            本机设备
+          </span>
+        </div>
+      </header>
+      <main id="main" tabindex="-1">
+        <div id="demo-banner" class="banner" hidden>
+          演示工作空间 · 以下为示例数据，所有服务写入已禁用。
+        </div>
+        <div id="connection-banner" class="banner error-banner" hidden>
+        </div>
+        <div class="page-title">
+          <div>
+            <div class="eyebrow" id="eyebrow">
+              YOUR NETWORK, AT A GLANCE
+            </div>
+            <h1 id="page-title">
+              一切就绪，准备联机。
+            </h1>
+            <p id="page-description">
+              网络、伙伴和下一场冒险，都在这里。
+            </p>
+          </div>
+          <div class="title-actions">
+            <button class="btn" id="export-top">
+              <span data-icon="download">
+              </span>
+              导出快照
+            </button>
+            <button class="btn primary" id="join-top">
+              <span data-icon="plus">
+              </span>
+              加入网络
+            </button>
           </div>
         </div>
-      </div>
-      <div class="setting">
-        <div class="lab">本机别名<small>改名后其他成员看到的名字会变</small></div>
-        <div class="ctl">
-          <input type="text" id="aliasInput" placeholder="新别名">
-          <button class="btn primary" id="aliasBtn">应用</button>
-        </div>
-      </div>
-      <div class="setting">
-        <div class="lab">管道路径</div>
-        <div class="ctl"><span class="mono" style="font-size:12px">\\.\pipe\RadminVpnGuiChannel</span></div>
-      </div>
-      <div class="setting">
-        <div class="lab">权限</div>
-        <div class="ctl"><span id="permText">—</span></div>
-      </div>
-      <div class="setting">
-        <div class="lab">本机节点 ID</div>
-        <div class="ctl"><span class="mono" style="font-size:12px" id="selfNode">—</span></div>
-      </div>
+        <section id="page-overview" class="page">
+          <div class="overview-top">
+            <article class="hero">
+              <div class="hero-copy">
+                <span class="hero-label">
+                  <i class="status-dot" id="hero-dot">
+                  </i>
+                  <span id="hero-status">
+                    正在连接本地服务
+                  </span>
+                </span>
+                <h2>
+                  让每一次联机，
+                  <br>
+                  都近在身边
+                  <span>
+                    。
+                  </span>
+                </h2>
+                <p>
+                  一个安静、有序的网络工作空间。
+                  <br>
+                  从这里出发，和伙伴们保持连接。
+                </p>
+                <button class="btn hero-btn" data-go="networks">
+                  查看我的网络
+                  <span>
+                    ↗
+                  </span>
+                </button>
+              </div>
+              <div class="topology" aria-label="网络结构示意，不表示实时连接状态">
+                <div class="orbit orbit-one">
+                </div>
+                <div class="orbit orbit-two">
+                </div>
+                <svg viewBox="0 0 320 270" aria-hidden="true">
+                  <path d="M160 135 72 65M160 135 262 73M160 135 257 209M160 135 67 216"/>
+                </svg>
+                <div class="node center-node">
+                  <span data-icon="network">
+                  </span>
+                </div>
+                <div class="node satellite s-one">
+                  <span data-icon="monitor">
+                  </span>
+                </div>
+                <div class="node satellite s-two">
+                  <span data-icon="gamepad">
+                  </span>
+                </div>
+                <div class="node satellite s-three">
+                  <span data-icon="users">
+                  </span>
+                </div>
+                <div class="node satellite s-four">
+                  <span data-icon="monitor">
+                  </span>
+                </div>
+                <span class="topology-caption">
+                  用网络，连接每一种热爱
+                </span>
+              </div>
+            </article>
+            <article class="card device-card">
+              <div class="section-label">
+                本机设备
+                <span data-icon="monitor">
+                </span>
+              </div>
+              <div class="device-avatar">
+                <span data-icon="monitor">
+                </span>
+                <i class="status-dot" id="device-dot">
+                </i>
+              </div>
+              <h3 id="device-name">
+                等待设备信息
+              </h3>
+              <p class="muted" id="device-node">
+                尚未读取节点 ID
+              </p>
+              <div class="device-ip">
+                <div>
+                  <small>
+                    虚拟 IPv4
+                  </small>
+                  <strong class="mono" id="device-ip">
+                    —
+                  </strong>
+                </div>
+                <button class="icon-btn" id="copy-ip" aria-label="复制本机虚拟 IP" title="复制 IP">
+                  <span data-icon="copy">
+                  </span>
+                </button>
+              </div>
+              <div class="device-bottom">
+                <span id="permission">
+                  等待服务
+                </span>
+                <button class="text-btn" data-go="settings">
+                  管理设备 ↗
+                </button>
+              </div>
+            </article>
+          </div>
+          <div class="stats-grid" id="stats">
+          </div>
+          <div class="section-heading">
+            <div>
+              <h2>
+                我的网络
+                <span class="section-count" id="overview-net-count">
+                  0
+                </span>
+              </h2>
+              <p>
+                熟悉的地方，熟悉的伙伴。
+              </p>
+            </div>
+            <button class="text-btn" data-go="networks">
+              查看全部
+              <span>
+                →
+              </span>
+            </button>
+          </div>
+          <div class="network-grid" id="overview-networks">
+          </div>
+          <div class="lower-grid">
+            <article class="card">
+              <div class="card-heading">
+                <h3>
+                  最近活动
+                </h3>
+                <button class="text-btn" data-go="activity">
+                  全部记录 →
+                </button>
+              </div>
+              <div id="overview-activity">
+              </div>
+            </article>
+            <article class="card quick-card">
+              <div class="card-heading">
+                <h3>
+                  下一场，一起玩什么？
+                </h3>
+                <span data-icon="compass">
+                </span>
+              </div>
+              <p>
+                发现更多公共网络，找到属于你的联机小队。
+              </p>
+              <div class="tags">
+                <span>
+                  Minecraft
+                </span>
+                <span>
+                  Terraria
+                </span>
+                <span>
+                  更多可能 ↗
+                </span>
+              </div>
+              <button class="btn" data-go="public">
+                探索公共网络
+                <span>
+                  →
+                </span>
+              </button>
+            </article>
+          </div>
+        </section>
+        <section id="page-networks" class="page" hidden>
+          <div class="filterbar">
+            <div class="searchbox">
+              <span data-icon="search">
+              </span>
+              <input id="network-search" aria-label="搜索网络" placeholder="搜索网络名称或 GUID…">
+            </div>
+            <select id="network-role" aria-label="按角色筛选">
+              <option value="all">
+                全部角色
+              </option>
+              <option value="admin">
+                我管理的
+              </option>
+              <option value="member">
+                我加入的
+              </option>
+            </select>
+            <button class="btn" id="favorites-only" aria-pressed="false">
+              ☆ 只看收藏
+            </button>
+            <button class="btn" id="create-top">
+              <span data-icon="plus">
+              </span>
+              创建网络
+            </button>
+          </div>
+          <div class="result-summary" id="network-summary">
+          </div>
+          <div class="network-grid" id="all-networks">
+          </div>
+        </section>
+        <section id="page-members" class="page" hidden>
+          <div class="filterbar">
+            <select id="member-network" aria-label="选择网络">
+            </select>
+            <div class="searchbox">
+              <span data-icon="search">
+              </span>
+              <input id="member-search" aria-label="搜索成员" placeholder="搜索别名、节点 ID、虚拟 IP 或状态…">
+            </div>
+            <select id="member-sort" aria-label="成员排序">
+              <option value="name">
+                按名称排序
+              </option>
+              <option value="id">
+                按节点 ID 排序
+              </option>
+            </select>
+            <button class="btn" id="export-members">
+              <span data-icon="download">
+              </span>
+              导出 CSV
+            </button>
+          </div>
+          <div class="info-note">
+            成员信息来自控制面快照；状态、角色、通道和延迟显示为服务实际返回值，未知字段会明确标注。
+          </div>
+          <div class="card table-card">
+            <div id="batchbar" class="batchbar" hidden>
+              <b id="selection-count">
+              </b>
+              <button class="btn small" id="batch-copy">
+                复制节点 ID
+              </button>
+              <button class="btn small" data-batch="approve">
+                批准加入
+              </button>
+              <button class="btn small" data-batch="grant">
+                授予管理员
+              </button>
+              <button class="btn small" data-batch="revoke">
+                撤销管理员
+              </button>
+              <button class="btn small danger" data-batch="kick">
+                移出网络
+              </button>
+              <button class="text-btn" id="clear-selection">
+                取消选择
+              </button>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>
+                      <input type="checkbox" id="select-page" aria-label="选择当前页成员">
+                    </th>
+                    <th>
+                      成员
+                    </th>
+                    <th>
+                      节点 ID
+                    </th>
+                    <th>
+                      虚拟地址
+                    </th>
+                    <th>
+                      状态 / 延迟
+                    </th>
+                    <th>
+                      公网 IP
+                    </th>
+                    <th>
+                      操作
+                    </th>
+                  </tr>
+                </thead>
+                <tbody id="members-body">
+                </tbody>
+              </table>
+            </div>
+            <div class="pagination">
+              <span id="members-summary">
+              </span>
+              <div>
+                <button class="btn small" id="prev-page">
+                  上一页
+                </button>
+                <span id="page-number">
+                </span>
+                <button class="btn small" id="next-page">
+                  下一页
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="page-public" class="page" hidden>
+          <div class="discovery-banner">
+            <span data-icon="compass">
+            </span>
+            <div>
+              <h2>
+                下一个联机伙伴，也许就在这里。
+              </h2>
+              <p>
+                搜索 Radmin VPN 公共网络。加入前，请确认你信任该网络的成员。
+              </p>
+            </div>
+          </div>
+          <form id="public-form" class="filterbar">
+            <div class="searchbox">
+              <span data-icon="search">
+              </span>
+              <input id="public-search" aria-label="搜索公共网络" placeholder="试试 Minecraft、DOTA 或网络名称…">
+            </div>
+            <button class="btn primary" id="public-submit">
+              搜索网络
+              <span>
+                →
+              </span>
+            </button>
+          </form>
+          <div class="result-summary" id="public-summary">
+            输入关键词，或直接搜索全部公共网络。
+          </div>
+          <div class="network-grid" id="public-results">
+          </div>
+        </section>
+        <section id="page-activity" class="page" hidden>
+          <div class="filterbar">
+            <p class="muted">
+              记录本次打开期间的操作请求、网络变化与错误，最多保留 100 条。
+            </p>
+            <button class="btn" id="export-activity">
+              <span data-icon="download">
+              </span>
+              导出记录
+            </button>
+            <button class="btn" id="clear-activity">
+              清空记录
+            </button>
+          </div>
+          <div class="card" id="activity-list">
+          </div>
+        </section>
+        <section id="page-settings" class="page" hidden>
+          <div class="settings-grid">
+            <div>
+              <article class="card settings-card">
+                <h3>
+                  按照你的习惯来
+                </h3>
+                <div class="setting">
+                  <div>
+                    <b>
+                      外观主题
+                    </b>
+                    <p>
+                      选择一个看着舒服的工作空间。
+                    </p>
+                  </div>
+                  <select id="theme-setting" aria-label="主题">
+                    <option value="light">
+                      暖白 · 浅色
+                    </option>
+                    <option value="dark">
+                      夜航 · 深色
+                    </option>
+                  </select>
+                </div>
+                <div class="setting">
+                  <div>
+                    <b>
+                      自动刷新
+                    </b>
+                    <p>
+                      页面隐藏时暂停，恢复后继续。
+                    </p>
+                  </div>
+                  <select id="refresh-interval" aria-label="自动刷新间隔">
+                    <option value="0">
+                      手动刷新
+                    </option>
+                    <option value="5">
+                      每 5 秒
+                    </option>
+                    <option value="10">
+                      每 10 秒
+                    </option>
+                    <option value="30">
+                      每 30 秒
+                    </option>
+                  </select>
+                </div>
+                <div class="setting">
+                  <div>
+                    <b>
+                      紧凑列表
+                    </b>
+                    <p>
+                      在相同空间内显示更多成员。
+                    </p>
+                  </div>
+                  <input type="checkbox" id="compact-setting" aria-label="紧凑列表">
+                </div>
+              </article>
+              <article class="card settings-card">
+                <h3>
+                  设备别名
+                </h3>
+                <p class="muted">
+                  其他网络成员会通过这个名字认识你。
+                </p>
+                <form id="alias-form" class="filterbar">
+                  <input id="alias-input" maxlength="64" required aria-label="设备别名" placeholder="给你的设备起个名字">
+                  <button class="btn primary">
+                    保存别名
+                  </button>
+                </form>
+              </article>
+              <article class="card settings-card">
+                <h3>
+                  数据与工具
+                </h3>
+                <div class="setting">
+                  <div>
+                    <b>
+                      导出当前快照
+                    </b>
+                    <p>
+                      包含成员和地址，请妥善保管。导出不包含密码令牌。
+                    </p>
+                  </div>
+                  <button class="btn" id="export-settings">
+                    导出 JSON
+                  </button>
+                </div>
+                <div class="setting">
+                  <div>
+                    <b>
+                      清空收藏
+                    </b>
+                    <p>
+                      仅清除本浏览器中的收藏标记。
+                    </p>
+                  </div>
+                  <button class="btn" id="clear-favorites">
+                    清空
+                  </button>
+                </div>
+              </article>
+            </div>
+            <div>
+              <article class="card settings-card">
+                <div class="about-mark">
+                  R↗
+                </div>
+                <h3>
+                  RvpnKit
+                  <span class="version">
+                    0.4.0
+                  </span>
+                </h3>
+                <p class="muted">
+                  轻一点的客户端，好一点的联机体验。
+                </p>
+                <dl class="details">
+                  <dt>
+                    服务权限
+                  </dt>
+                  <dd id="settings-permission">
+                    等待连接
+                  </dd>
+                  <dt>
+                    管道
+                  </dt>
+                  <dd class="mono">
+                    \\.\pipe\RadminVpnGuiChannel
+                  </dd>
+                  <dt>
+                    快捷键
+                  </dt>
+                  <dd>
+                    R 刷新 · / 搜索 · Esc 关闭弹窗
+                  </dd>
+                  <dt>
+                    项目主页
+                  </dt>
+                  <dd>
+                    <a href="https://github.com/block-fox/rvpnkit" target="_blank" rel="noopener noreferrer">
+                      block-fox / rvpnkit ↗
+                    </a>
+                  </dd>
+                </dl>
+                <button class="btn" id="power-request" style="margin-top:20px">
+                  发送 VPN 电源请求
+                </button>
+              </article>
+              <article class="card settings-card">
+                <h3>
+                  关于数据
+                </h3>
+                <p class="muted">
+                  本工具管理已有的 Radmin VPN 服务，不提供 VPN 驱动。成员状态、角色、通道和延迟均来自控制面快照，未知值不会被猜测。
+                </p>
+                <p class="muted">
+                  服务确认请求后仍需等待下一次快照；最终结果以服务返回的状态为准。
+                </p>
+              </article>
+            </div>
+          </div>
+        </section>
+        <footer class="main-footer">
+          <span>
+            RvpnKit
+            <span class="footer-dot">
+              ·
+            </span>
+            为一起玩的时刻而造
+          </span>
+          <span id="footer-status">
+            连接本地 Radmin VPN 服务
+          </span>
+        </footer>
+      </main>
     </div>
-
-    <div class="card">
-      <div class="card-head">已知限制</div>
-      <div style="padding:6px 0">
-        <div class="setting">
-          <div class="lab">创建网络设密码<small>抓到的创建请求全是免密码网络，没有样本可对照。需要官方客户端建一个带密码的网络才能解出字段位置</small></div>
+    <dialog id="action-dialog" aria-labelledby="dialog-title">
+      <form id="action-form">
+        <div class="dialog-heading">
+          <div>
+            <div class="eyebrow">
+              RVPNKIT WORKSPACE
+            </div>
+            <h2 id="dialog-title">
+            </h2>
+          </div>
+          <button type="button" class="icon-btn" id="dialog-close" aria-label="关闭弹窗">
+            ✕
+          </button>
         </div>
-        <div class="setting">
-          <div class="lab">成员的虚拟 IP / IPv6 / 通道类型<small>这些不在控制面快照里。快照只提供别名、公网 IP 和节点 ID</small></div>
+        <div id="dialog-content">
         </div>
-        <div class="setting">
-          <div class="lab">网络改名<small>官方客户端本身也没有入口（CUpdateNetwork 不可达）</small></div>
+        <div class="dialog-actions">
+          <button type="button" class="btn" id="dialog-cancel">
+            取消
+          </button>
+          <button type="submit" class="btn primary" id="dialog-submit">
+            确认
+          </button>
         </div>
-      </div>
+      </form>
+    </dialog>
+    <div id="toasts" aria-live="polite">
     </div>
-  </section>
-</main>
-
-<footer>
-  <span id="status">就绪</span>
-  <span style="margin-left:auto" id="counts"></span>
-</footer>
-
-<div id="menu"></div>
-<div class="toast" id="toast"></div>
-
-<div id="modal">
-  <div class="dialog">
-    <header><span id="dlgTitle">属性</span><span class="x" id="dlgClose">✕</span></header>
-    <div class="body" id="dlgBody"></div>
-    <footer>
-      <button class="btn" id="dlgCopy">复制节点 ID</button>
-      <button class="btn primary" id="dlgOk">关闭</button>
-    </footer>
-  </div>
-</div>
-
-<script>
-"use strict";
-const $ = s => document.querySelector(s);
-const $$ = s => Array.from(document.querySelectorAll(s));
-
-const state = {
-  page:"networks", nets:[], selNet:0, pub:[], selPub:-1,
-  canWrite:true, self:null, powerOn:true, sel:new Set(), filter:"", dlgNode:null,
-};
-
-/* ─────────────── 主题 */
-function applyTheme(t){
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem("rvpnkit-theme", t);
-  $$("[data-theme-set]").forEach(b => b.classList.toggle("on", b.dataset.themeSet === t));
-}
-const qtheme = new URLSearchParams(location.search).get("theme");
-applyTheme(qtheme || localStorage.getItem("rvpnkit-theme") || "dark");
-$$("[data-theme-set]").forEach(b => b.onclick = () => applyTheme(b.dataset.themeSet));
-
-/* ─────────────── HTTP */
-async function api(path, body){
-  const opt = body === undefined ? {} : {
-    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)};
-  const r = await fetch(path, opt);
-  const j = await r.json().catch(() => ({ok:false, error:"响应不是 JSON"}));
-  if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
-  return j.data;
-}
-function toast(msg, bad){
-  const t = $("#toast");
-  t.textContent = msg;
-  t.style.color = bad ? "var(--danger)" : "var(--fg)";
-  t.classList.add("show");
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove("show"), 3400);
-}
-const setStatus = s => $("#status").textContent = s;
-const busy = on => $("#spinner").innerHTML = on ? '<span class="spin">◌</span>' : "";
-
-/* ─────────────── 右键菜单
-   注意：在输入框上 / 有文字选中时不能拦截浏览器原生菜单，
-   否则复制粘贴就没了。 */
-function showMenu(ev, title, items){
-  const t = ev.target;
-  const isField = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
-  const hasSel = window.getSelection && String(window.getSelection()).length > 0;
-  if (isField || hasSel) return;      // 交还给浏览器
-
-  ev.preventDefault();
-  const m = $("#menu");
-  m.innerHTML = "";
-  if (title){
-    const d = document.createElement("div");
-    d.className = "mt"; d.textContent = title; m.appendChild(d);
-  }
-  for (const it of items){
-    if (it === "-"){ m.appendChild(document.createElement("hr")); continue; }
-    const b = document.createElement("button");
-    b.textContent = it.label;
-    if (it.danger) b.className = "danger";
-    if (it.key){
-      const k = document.createElement("span");
-      k.className = "k"; k.textContent = it.key; b.appendChild(k);
-    }
-    b.onclick = () => { hideMenu(); it.run(); };
-    m.appendChild(b);
-  }
-  m.style.display = "block";
-  const r = m.getBoundingClientRect();
-  let x = ev.clientX, y = ev.clientY;
-  if (x + r.width > innerWidth - 8) x = innerWidth - r.width - 8;
-  if (y + r.height > innerHeight - 8) y = innerHeight - r.height - 8;
-  m.style.left = x + "px"; m.style.top = y + "px";
-}
-const hideMenu = () => $("#menu").style.display = "none";
-addEventListener("click", hideMenu);
-addEventListener("blur", hideMenu);
-addEventListener("scroll", hideMenu, true);
-
-/* ─────────────── 渲染 */
-const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-
-function renderNav(){
-  $("#cNet").textContent = state.nets.length || "";
-  const n = state.nets[state.selNet];
-  $("#cMem").textContent = n ? n.members.length : "";
-  $("#cPub").textContent = state.pub.length || "";
-}
-
-function renderSelf(){
-  const s = state.self;
-  $("#selfAlias").textContent = s ? (s.alias || "?") : "—";
-  $("#selfIp").textContent = s && s.publicIp ? s.publicIp : "—";
-  $("#selfVip").textContent = s && s.virtualIp ? s.virtualIp : "";
-  $("#selfNode").textContent = s ? "#" + s.nodeId : "—";
-  $("#counts").textContent =
-    `网络 ${state.nets.length} · 成员 ${state.nets.reduce((a,n)=>a+n.members.length,0)}`;
-}
-
-function renderPerm(){
-  const ok = state.canWrite;
-  $("#perm").innerHTML = ok
-    ? '<span class="dot ok"></span>可读写'
-    : '<span class="dot ro"></span>只读';
-  $("#permText").textContent = ok ? "可读写"
-    : "只读 —— 受限环境会降低进程完整性级别，请用普通用户身份直接启动";
-  $$(".btn.primary").forEach(b => b.disabled = !ok);
-}
-
-function renderNets(){
-  const tb = $("#netBody"); tb.innerHTML = "";
-  $("#netEmpty").style.display = state.nets.length ? "none" : "block";
-  $("#netSub").textContent = state.nets.length ? `${state.nets.length} 个` : "";
-
-  state.nets.forEach((n, i) => {
-    const tr = document.createElement("tr");
-    if (i === state.selNet) tr.className = "sel";
-    tr.innerHTML = `<td><span class="rowname">${esc(n.name)}</span></td>
-                    <td class="num">${n.members.length}</td>
-                    <td class="mono">${n.guid.slice(0,16)}…</td>`;
-    tr.onclick = () => { state.selNet = i; state.sel = new Set(); renderAll(); };
-    tr.ondblclick = () => { state.selNet = i; state.sel = new Set(); go("members"); };
-    tr.oncontextmenu = ev => showMenu(ev, n.name, [
-      {label:"查看成员", key:"双击", run:()=>{ state.selNet=i; state.sel=new Set(); go("members"); }},
-      "-",
-      {label:"启用网络", run:()=>netOp(n.guid,"enabled",{enabled:true},"启用 "+n.name)},
-      {label:"禁用网络", run:()=>netOp(n.guid,"enabled",{enabled:false},"禁用 "+n.name)},
-      "-",
-      {label:"复制 GUID", run:()=>copy(n.guid,"已复制 GUID")},
-      {label:"复制网络名", run:()=>copy(n.name,"已复制网络名")},
-      "-",
-      {label:"离开网络", danger:true, run:()=>netOp(n.guid,"leave",undefined,"离开 "+n.name)},
-      {label:"删除网络", danger:true, run:()=>netOp(n.guid,"delete",undefined,"删除 "+n.name)},
-    ]);
-    tb.appendChild(tr);
-  });
-}
-
-function visibleMembers(){
-  const n = state.nets[state.selNet];
-  if (!n) return [];
-  const f = state.filter.trim().toLowerCase();
-  return n.members.map((m,i)=>({m,i})).filter(({m}) =>
-    !f || String(m.nodeId).includes(f)
-        || (m.alias||"").toLowerCase().includes(f)
-        || (m.publicIp||"").includes(f));
-}
-
-function renderMembers(){
-  const n = state.nets[state.selNet];
-  $("#memNetName").textContent = n ? n.name : "";
-  $("#memEmpty").style.display = n ? "none" : "block";
-  const tb = $("#memBody"); tb.innerHTML = "";
-  if (!n) { renderBatch(); return; }
-
-  for (const {m,i} of visibleMembers()){
-    const tr = document.createElement("tr");
-    if (state.sel.has(m.nodeId)) tr.className = "sel";
-    tr.innerHTML = `
-      <td><input type="checkbox" class="chk" ${state.sel.has(m.nodeId)?"checked":""}></td>
-      <td class="mono">${m.nodeId}</td>
-      <td>${esc(m.alias || "-")}</td>
-      <td class="dim">${esc(m.publicIp || "-")}</td>
-      <td class="dim">${esc(m.virtualIp || "—")}</td>`;
-    const cb = tr.querySelector("input");
-    cb.onclick = e => {
-      e.stopPropagation();
-      if (cb.checked) state.sel.add(m.nodeId); else state.sel.delete(m.nodeId);
-      tr.classList.toggle("sel", cb.checked);
-      renderBatch();
-    };
-    tr.onclick = e => { if (e.target !== cb) openProps(m, n); };
-    tr.oncontextmenu = ev => showMenu(ev, m.alias || ("#" + m.nodeId), [
-      {label:"查看属性", run:()=>openProps(m, n)},
-      "-",
-      {label:"授权管理员", run:()=>memOp(n.guid,[m.nodeId],"grant",n.name,"授权")},
-      {label:"撤销管理员", run:()=>memOp(n.guid,[m.nodeId],"revoke",n.name,"撤权")},
-      "-",
-      {label:"复制节点 ID", run:()=>copy(String(m.nodeId),"已复制节点 ID")},
-      {label:"复制公网 IP", run:()=>copy(m.publicIp||"","已复制 IP")},
-      "-",
-      {label:"踢出网络", danger:true, run:()=>memOp(n.guid,[m.nodeId],"kick",n.name,"踢出")},
-    ]);
-    tb.appendChild(tr);
-  }
-  renderBatch();
-}
-
-function renderBatch(){
-  const on = state.sel.size > 0;
-  $("#batchBar").classList.toggle("on", on);
-  $("#batchCount").textContent = state.sel.size;
-  const all = $$("#memBody input.chk");
-  const chkAll = $("#memChkAll");
-  chkAll.checked = all.length > 0 && all.every(c => c.checked);
-  chkAll.indeterminate = !chkAll.checked && all.some(c => c.checked);
-}
-
-function renderPub(){
-  const tb = $("#pubBody"); tb.innerHTML = "";
-  $("#pubEmpty").style.display = state.pub.length ? "none" : "block";
-  $("#pubSub").textContent = state.pub.length ? `${state.pub.length} 个可加入` : "";
-  state.pub.forEach((name,i) => {
-    const tr = document.createElement("tr");
-    if (i === state.selPub) tr.className = "sel";
-    tr.innerHTML = `<td>${esc(name)}</td>`;
-    tr.onclick = () => { state.selPub = i; renderPub(); };
-    tr.ondblclick = () => doJoin(name);
-    tr.oncontextmenu = ev => showMenu(ev, name, [
-      {label:"加入这个网络", run:()=>doJoin(name)},
-      {label:"复制网络名", run:()=>copy(name,"已复制")},
-    ]);
-    tb.appendChild(tr);
-  });
-}
-
-const renderAll = () => { renderSelf(); renderPerm(); renderNets(); renderMembers(); renderPub(); renderNav(); };
-
-/* ─────────────── 属性弹窗 */
-function openProps(m, net){
-  state.dlgNode = String(m.nodeId);
-  $("#dlgTitle").textContent = m.alias || ("#" + m.nodeId);
-  const unk = '<span class="unknown">—（控制面快照未提供）</span>';
-  $("#dlgBody").innerHTML = `
-    <div class="dlg-sec">成员</div>
-    <dl class="kv">
-      <dt>名称</dt><dd>${esc(m.alias || "-")}</dd>
-      <dt>节点 ID</dt><dd class="mono">${m.nodeId}</dd>
-      <dt>公网 IP</dt><dd class="mono">${esc(m.publicIp || "-")}</dd>
-      <dt>虚拟 IPv4</dt><dd class="mono">${m.virtualIp ? esc(m.virtualIp) : unk}</dd>
-      <dt>虚拟 IPv6</dt><dd>${unk}</dd>
-    </dl>
-    <div class="dlg-sec">网络</div>
-    <dl class="kv">
-      <dt>网络名称</dt><dd>${esc(net.name)}</dd>
-      <dt>角色</dt><dd>${unk}</dd>
-    </dl>
-    <div class="dlg-sec">连接</div>
-    <dl class="kv">
-      <dt>状态</dt><dd>${unk}</dd>
-      <dt>通道类型</dt><dd>${unk}</dd>
-    </dl>
-    <p style="color:var(--faint);font-size:11.5px;margin:14px 0 0;line-height:1.7">
-      节点 ID 是 Radmin 内部给每个成员编的号，踢人 / 授权时用它定位，<b>不是 IP 地址</b>。
-      虚拟 IP、角色、通道类型这些原版能从数据面读到，控制面快照里没有。
-    </p>`;
-  $("#modal").classList.add("on");
-}
-const closeModal = () => $("#modal").classList.remove("on");
-$("#dlgClose").onclick = closeModal;
-$("#dlgOk").onclick = closeModal;
-$("#modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
-$("#dlgCopy").onclick = () => state.dlgNode && copy(state.dlgNode, "已复制节点 ID");
-addEventListener("keydown", e => { if (e.key === "Escape"){ closeModal(); hideMenu(); } });
-
-function copy(text, msg){
-  navigator.clipboard?.writeText(text).then(()=>toast(msg||"已复制"), ()=>toast("复制失败", true));
-}
-
-/* ─────────────── 操作 */
-async function netOp(guid, op, body, label){
-  try { busy(true); await api(`/api/networks/${guid}/${op}`, body);
-        toast("已请求：" + label); await refresh(); }
-  catch(e){ toast(e.message, true); } finally { busy(false); }
-}
-async function memOp(guid, nodeIds, op, name, label){
-  try {
-    busy(true);
-    for (const id of nodeIds) await api(`/api/networks/${guid}/members/${id}/${op}`, {name});
-    toast(`已请求：${label} ${nodeIds.length} 个`);
-    state.sel.clear(); renderMembers();
-  } catch(e){ toast(e.message, true); } finally { busy(false); }
-}
-async function doJoin(name){
-  try { busy(true); await api("/api/networks/join", {name});
-        toast("已请求加入 " + name); state.pub = []; renderPub(); await refresh(); }
-  catch(e){ toast(e.message, true); } finally { busy(false); }
-}
-async function refresh(){
-  try {
-    busy(true);
-    const d = await api("/api/state");
-    state.nets = d.networks || [];
-    state.canWrite = d.canWrite;
-    state.self = d.self;
-    if (state.selNet >= state.nets.length) state.selNet = 0;
-    renderAll();
-    setStatus("已刷新 · " + new Date().toLocaleTimeString());
-  } catch(e){ toast(e.message, true); setStatus("刷新失败：" + e.message); }
-  finally { busy(false); }
-}
-
-/* ─────────────── 页面切换 */
-function go(p){
-  state.page = p;
-  $$(".nav button").forEach(b => b.classList.toggle("on", b.dataset.page === p));
-  $$(".page").forEach(s => s.classList.toggle("on", s.id === "page-" + p));
-  if (p === "members") renderMembers();
-}
-$$(".nav button").forEach(b => b.onclick = () => go(b.dataset.page));
-
-/* ─────────────── 事件 */
-$("#refreshBtn").onclick = refresh;
-
-$("#powerBtn").onclick = async () => {
-  const target = !state.powerOn;
-  try {
-    busy(true);
-    await api("/api/power", {on: target});
-    state.powerOn = target;
-    const b = $("#powerBtn");
-    b.className = "pill " + (target ? "on" : "off");
-    $("#powerTxt").textContent = target ? "已开启" : "已关闭";
-    toast(target ? "已请求开启 VPN" : "已请求关闭 VPN");
-  } catch(e){ toast(e.message, true); } finally { busy(false); }
-};
-
-$("#joinBtn").onclick = () => { const n = $("#joinName").value.trim(); if (n) doJoin(n); };
-$("#createBtn").onclick = async () => {
-  const name = $("#joinName").value.trim(); if (!name) return;
-  try { busy(true); await api("/api/networks/create", {name});
-        toast("已请求创建 " + name); await refresh(); }
-  catch(e){ toast(e.message, true); } finally { busy(false); }
-};
-$("#aliasBtn").onclick = async () => {
-  const alias = $("#aliasInput").value.trim(); if (!alias) return;
-  try { busy(true); await api("/api/alias", {alias});
-        toast("已请求改别名 → " + alias); await refresh(); }
-  catch(e){ toast(e.message, true); } finally { busy(false); }
-};
-$("#searchBtn").onclick = async () => {
-  const q = encodeURIComponent($("#q").value.trim());
-  try { busy(true); setStatus("正在枚举公共网络…");
-        const d = await api("/api/public?search=" + q);
-        state.pub = d.networks || []; state.selPub = state.pub.length ? 0 : -1;
-        renderPub(); renderNav(); setStatus(`公共网络 ${state.pub.length} 个`); }
-  catch(e){ toast(e.message, true); setStatus("搜索失败：" + e.message); }
-  finally { busy(false); }
-};
-$("#joinSelBtn").onclick = () => {
-  if (state.selPub >= 0 && state.pub[state.selPub]) doJoin(state.pub[state.selPub]);
-};
-
-$("#memFilter").oninput = e => { state.filter = e.target.value; renderMembers(); };
-$("#memSelAll").onclick = () => {
-  visibleMembers().forEach(({m}) => state.sel.add(m.nodeId));
-  renderMembers();
-};
-$("#memSelNone").onclick = () => { state.sel.clear(); renderMembers(); };
-$("#memChkAll").onchange = e => {
-  if (e.target.checked) visibleMembers().forEach(({m}) => state.sel.add(m.nodeId));
-  else state.sel.clear();
-  renderMembers();
-};
-
-function batchOp(op, label){
-  const n = state.nets[state.selNet];
-  if (!n || state.sel.size === 0) return;
-  memOp(n.guid, Array.from(state.sel), op, n.name, label);
-}
-$("#batchKick").onclick = () => batchOp("kick", "踢出");
-$("#batchGrant").onclick = () => batchOp("grant", "授权");
-$("#batchRevoke").onclick = () => batchOp("revoke", "撤权");
-$("#batchCopy").onclick = () => {
-  copy(Array.from(state.sel).join("\n"), `已复制 ${state.sel.size} 个节点 ID`);
-};
-
-/* ─────────────── 启动 */
-refresh().then(() => {
-  // 调试/深链：?page=members 直接进成员页，?props=1 顺带打开第一个成员的属性
-  const sp = new URLSearchParams(location.search);
-  const p = sp.get("page");
-  if (p) go(p);
-  if (sp.get("props")){
-    const n = state.nets[state.selNet];
-    if (n && n.members.length) openProps(n.members[0], n);
-  }
-});
-setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 8000);
-</script>
-</body>
+  </body>
 </html>

@@ -1,82 +1,43 @@
-﻿# Rust 客户端（rvpnkit）
+# Rust 客户端与开发
 
-用 Rust 重写的图形客户端：**Rust 后端 + 本地 Web UI**。
+当前 Rust workspace 包含 `rvpn-core`、`rvpn-web` 与 `rvpn-gui`。主线版本为 0.4.0；0.2 的环境排查记录见 [历史说明](legacy/RUST_CLIENT_0.2.md)。
 
-```
-┌──────────────┬──────────────────────────────────────────────┐
-│ RvpnKit      │  ⏻ 已开启   刷新    快乐狐狸 #204206449 IP   │
-│              ├──────────────────────────────────────────────┤
-│ 网络    14   │  网络                                        │
-│ 成员   171   │  双击进入成员页；右键可启用/禁用/离开/删除    │
-│ 公共网络     │  ┌────────────────────────────────────────┐  │
-│ 设置         │  │ 网络名            成员    GUID          │  │
-│              │  │ Minecraft [中文 11]  171   4c791750…    │  │
-│ ● 直连管道   │  │ Minecraft [中文 9]   234   9315f557…    │  │
-│ ● 可读写     │  └────────────────────────────────────────┘  │
-├──────────────┴──────────────────────────────────────────────┤
-│ 已刷新 · 17:35:07                        网络 14 · 成员 3461 │
-└─────────────────────────────────────────────────────────────┘
+## 构建
+
+```powershell
+cd rust
+cargo build --workspace --release --locked
+cargo test --workspace --release --locked
+cargo fmt --all -- --check
 ```
 
-## 两个客户端，都可用
+离线环境可以加 `--offline`，前提是依赖已缓存。Windows GNU 工具链如缺少 binutils，参阅 [环境说明](WINDOWS_GNU_TOOLCHAIN.md)；不要将个人电脑上的编译目录写进发布脚本。
 
-| 客户端 | 产物 | 特点 |
-|---|---|---|
-| **egui 原生窗口** | `rvpnkit-gui.exe`（4.8 MB） | 真正的桌面窗口，左侧分页栏 + 右键菜单 |
-| **本地 Web UI** | `rvpnkit.exe`（605 KB） | 浏览器里打开，跨平台、CSS 随便调 |
+仓库根目录的 `dev.ps1` 封装了 build / test / web / gui / demo-web / demo-gui / package，自动进入正确目录，以加载 `rust/.cargo/config.toml`。
 
-两者共用 `rvpn-core`，协议逻辑完全一致。原生窗口截图见 `docs/rust-egui.png`，
-Web UI 截图见 `docs/rust-web-ui.png`。
+## 结构与职责
 
-### 原生窗口曾经构建失败，后来修好了
+- **rvpn-core**：协议帧、密码令牌、命名管道、快照。`presentation.rs` 提供去除敏感令牌的快照 JSON、CSV 转义与明确标注的演示数据。
+- **rvpn-web**：`main.rs` 路由与 API，`http.rs` 有界请求解析，`backend.rs` 可选 agent 客户端。`ui.html` / `ui.css` / `ui.js` 分离维护，编译时嵌入二进制。
+- **rvpn-gui**：`main.rs` 生命周期与后台任务，`pages.rs` 管理页面，`workspace.rs` 总览与工具，`theme.rs` 配色与矢量图标，`preferences.rs` 配置，`backend.rs` 管道访问，`properties.rs` 成员属性。
 
-一开始 egui 编不过：`raw-dylib` 需要 `dlltool`，而 Rust 自带的 dlltool 缺
-`as.exe` 和几个运行库。走了不少弯路（详见
-[WINDOWS_GNU_TOOLCHAIN.md](WINDOWS_GNU_TOOLCHAIN.md)），最终靠
-「正确的链接参数 + MSYS2 的 binutils + 补齐运行库 DLL」解决。
+服务写操作由现有协议构建器生成；没有重写 VPN 驱动或数据平面。刷新保留真实快照，界面不虚构缺失的成员状态。
 
-所以现在两个客户端都能编、都能跑。
+## WebUI 行为
 
-### 为什么还留着 Web UI
+默认只监听 `127.0.0.1:8788`，无需 CDN 或 npm。服务未启动时仍可打开页面；手动刷新可恢复连接。自动刷新可设为关闭 / 5 / 10 / 30 秒，页面隐藏时暂停，同一页面不会重叠刷新。
 
-不是退而求其次 —— 它有自己的优势：
+HTTP 输入限制：请求行 4 KiB、请求头总量 16 KiB、JSON 体 64 KiB，最多 16 个并发连接；写操作要求 JSON 并拒绝跨来源 Origin。直连服务请求串行访问，快照短缓存 2 秒，手动刷新跳过缓存。agent 响应限制为 8 MiB，支持分块编码与被分块切开的 UTF-8。
 
-| 维度 | egui 原生 | Web UI |
-|---|---|---|
-| 外观 | 受限于 egui 默认控件 | CSS 想怎么做怎么做 |
-| 跨平台 | 要按平台编译 | 任何有浏览器的机器 |
-| 分发 | 4.8 MB 单文件 | 605 KB 单文件 |
-| 远程管理 | 不行 | 天然支持（`--addr 0.0.0.0`） |
-| 原生窗口 | ✅ | ❌（但可以套 WebView2 壳） |
+`/api/state` 的节点 ID 使用十进制字符串，避免 JavaScript 丢失 64 位整数精度。响应不包含网络密码令牌。
 
----
+## 回归测试
 
-## 原生窗口（主力客户端）
-
-`rvpnkit-gui.exe` 是图形化主力，Web UI 只作备用。
-
-| 能力 | 说明 |
-|---|---|
-| 深浅色主题 | 设置页切换，写入 `%APPDATA%\RvpnKit\ui.conf`，默认浅色 |
-| 成员多选 | 勾选列 + 全选/清空 + 筛选框，选中后可批量授权/撤权/踢出/复制 ID |
-| 属性弹窗 | 双击成员或右键「查看属性」；控制面拿不到的字段标「—（控制面快照未提供）」 |
-| 右键菜单 | 网络行、成员行、公共网络行都能右键 |
-| 节点 ID 说明 | 表头与弹窗里都注明它是 Radmin 内部编号，不是 IP |
-
-调试/截图用的命令行参数：
-
-```
-rvpnkit-gui.exe --light | --dark     指定主题
-rvpnkit-gui.exe --page=members       直接进某个页面（networks/members/public/settings）
-rvpnkit-gui.exe --props              自动打开第一个成员的属性
+```powershell
+# 已安装 Playwright 及本地 Chrome / Edge 时
+node scripts\web-smoke.cjs
 ```
 
-### 踩过的坑
+脚本启动只读演示后端，测试真实 HTTP 输入限制和浏览器交互；对可写 UI 的请求使用本地拦截响应，不操作实际 VPN。自定义路径可使用 `RVPNKIT_WEB_EXE`、`RVPNKIT_BROWSER`、`RVPNKIT_TEST_PORT`；已有 Playwright 安装可通过 `NODE_PATH` 复用。
 
-- `ui.add_sized([w,h], SelectableLabel)` 会把文字**居中**，列表行要用
-  `allocate_exact_size` + `painter.text` 自绘才左对齐。
-- `Window` 传了自定义 `frame()` 后标题栏会变成灰色，改用 `title_bar(false)`
-  自己画标题行。
-- `card(&self, ...)` 与闭包里的 `self` 抢借用，卡片容器改成自由函数。
-- 空闲时不重绘，某些合成器会留着上一帧残影（表现为界面里出现窗外桌面图案），
-  所以空闲也保持 400ms 一次的低频重绘。
+GUI 真实渲染验收：`rvpnkit-gui.exe --screenshot-dir <目录>`。截图模式强制演示数据并自动退出。

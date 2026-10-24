@@ -2,7 +2,7 @@
 //!
 //! 期望值全部来自 `docs/PROTOCOL_COMMANDS.md` 里记录的实际报文。
 
-use rvpn_core::{encode_string, decode_string, Commands, RecordType, Wire, CommandCode};
+use rvpn_core::{decode_string, encode_string, CommandCode, Commands, RecordType, Wire};
 
 fn hex(s: &str) -> Vec<u8> {
     let cleaned: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
@@ -15,9 +15,13 @@ fn hex(s: &str) -> Vec<u8> {
 fn check(name: &str, actual: Vec<u8>, expected: &str) {
     let want = hex(expected);
     assert_eq!(
-        actual, want,
+        actual,
+        want,
         "\n{name} 不一致\n实际: {}\n期望: {}",
-        actual.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        actual
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
         want.iter().map(|b| format!("{b:02x}")).collect::<String>()
     );
     println!("  ✓ {name:<28} {} 字节", actual.len());
@@ -104,7 +108,10 @@ fn string_roundtrip() {
         let enc = encode_string(s);
         let dec = decode_string(&enc);
         assert_eq!(dec.as_deref(), Some(s), "往返失败: {s}");
-        println!("  ✓ 往返 {s:<30} {}", enc.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        println!(
+            "  ✓ 往返 {s:<30} {}",
+            enc.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
     }
 }
 
