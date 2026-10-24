@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
-"""rvpncmd —— 向 Radmin VPN 控制服务下发命令。
+"""rvpncmd —— 向 Radmin VPN 控制服务下发命令（逆向自官方 GUI 的真实报文）。
 
-为什么单独做成 Python 工具
---------------------------
-C# 客户端（rvpnkit.exe）从当前环境打开管道的读写模式会得到
-ERROR_ACCESS_DENIED(5)，而同一时刻 Python 能打开成功；用 PowerShell 内嵌的
-.NET 直接调同一个 CreateFileW 也能成功。也就是说这是 **rvpnkit.exe 这个进程
-被施加的令牌限制**，而非代码缺陷（读写参数、路径、共享模式都逐项核对过）。
-沙箱审批在本会话里被禁用，无法提权绕过，所以把写通道独立成 Python 工具。
+字符串编码：UTF-16 **大端**，后面固定跟 2 字节 `00 01`
+-----------------------------------------------------
+这条最初判错了。别名「快乐狐狸1」的记录是
+    5f eb 4e 50 72 d0 72 f8 00 31 00 01
+而 5f eb 正是 U+5FEB「快」的大端编码。之前按 UTF-16LE 处理之所以
+还能成功，是因为网络名恰好几乎全是 ASCII：ASCII 在 LE 下是 <char>00，
+前面补一个 00 就和 BE 的 00<char> 逐字节重合了。名字含非 ASCII 或长度为
+奇数时两种写法就会分叉，所以这里统一按 BE。
 
-命令帧格式
-----------
-全部来自对官方 GUI 的 IAT hook 抓包，并用服务端日志
-"[req:N] Requested to join network '...'" 验证过。一条帧由若干记录组成：
+命令表（命令码 = 第二条记录里的 u32）
+-----------------------------------
+  0x02 (2)   创建 / 离开网络（容器 0x2b，含 28 字节随机块，语义待定）
+  0x03 (3)   加入网络（容器 0x1b，只有网络名）
+  0x08 (8)   离开网络（按 GUID，后面跟一个 u32=0 字段 0x16）
+  0x0f (15)  删除网络（按 GUID）
+  0x12 (18)  改别名
+  0x13 (19)  枚举公共网络（字段 0x06 是过滤前缀，空串=全部）
 
-    [size:u32 BE][typeCode:u8][0x00][0x03][field:u8][payload]
+记录格式
+--------
+    [size:u32 BE][类型码:u8][0x00][0x03][字段:u8][payload]
 
-「加入网络」的整体结构（网络名 24 字符时共 102 字节）：
-
-    记录1  size=4    type=0x01 field=0x4a  payload=reqId(u32 BE)
-    记录2  size=4    type=0x01 field=0x00  payload=命令码(u32 BE)   3=加入
-    容器   size=N    type=0x13 field=0x1b  payload=下面两条记录
-      记录3 size=4   type=0x0b field=0x3f  payload=1(u32 BE)
-      记录4 size=M   type=0x03 field=0x06  payload=00 + 名字(UTF-16LE) + 01
-
-长度关系（nameBytes = 网络名的 UTF-16LE 字节数）：
-    记录4 的 size = nameBytes + 2
-    容器的 size   = 12 + (nameBytes + 10)
-    整帧 body     = nameBytes + 54
-
-用法：
-    python rvpncmd.py join "Minecraft [Português 10]"
-    python rvpncmd.py send <hex>            # 发送任意帧正文
-    python rvpncmd.py build "名称"          # 只打印构造出的帧，不发送
+用法
+----
+    python rvpncmd.py join "网络名"
+    python rvpncmd.py leave <guid-hex>        # 16 字节 GUID
+    python rvpncmd.py delete <guid-hex>
+    python rvpncmd.py alias "新别名"
+    python rvpncmd.py enum                    # 枚举公共网络
+    python rvpncmd.py send <hex>              # 发送任意帧正文
+    python rvpncmd.py build "网络名"           # 只打印不发送
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -45,8 +44,12 @@ import time
 PIPE = r"\\.\pipe\RadminVpnGuiChannel"
 SVC = r"C:\ProgramData\Famatech\Radmin VPN\service.log"
 
-CMD_JOIN = 3
-CONTAINER_TAG = 0x0000131B
+CMD_CREATE_OR_LEAVE = 0x02
+CMD_JOIN = 0x03
+CMD_LEAVE = 0x08
+CMD_DELETE = 0x0F
+CMD_ALIAS = 0x12
+CMD_ENUM = 0x13
 
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 k32.CreateFileW.restype = ctypes.c_void_p
@@ -60,41 +63,74 @@ INVALID = ctypes.c_void_p(-1).value
 GENERIC_READ, GENERIC_WRITE, OPEN_EXISTING = 0x80000000, 0x40000000, 3
 
 
+# ---------------------------------------------------------------- 基础构件
+
 def rec(size: int, type_code: int, field: int) -> bytes:
-    """写 8 字节记录头。"""
     return struct.pack(">I", size) + bytes([type_code, 0x00, 0x03, field])
 
 
+def str_be(text: str) -> bytes:
+    """字符串载荷：UTF-16BE + 00 01。"""
+    return text.encode("utf-16-be") + b"\x00\x01"
+
+
+def rec_str(text: str, field: int) -> bytes:
+    payload = str_be(text)
+    return rec(len(payload), 0x03, field) + payload
+
+
+def rec_u32(value: int, field: int, type_code: int = 0x0B) -> bytes:
+    return rec(4, type_code, field) + struct.pack(">I", value)
+
+
+def rec_guid(guid: bytes, field: int = 0x09) -> bytes:
+    assert len(guid) == 16, f"GUID 必须 16 字节，实际 {len(guid)}"
+    return rec(16, 0x0D, field) + guid
+
+
+def head(req_id: int, command: int) -> bytes:
+    return (rec(4, 0x01, 0x4A) + struct.pack(">I", req_id)
+            + rec(4, 0x01, 0x00) + struct.pack(">I", command))
+
+
+# ---------------------------------------------------------------- 各命令
+
 def build_join(name: str, req_id: int) -> bytes:
-    """构造「加入网络」命令帧正文（不含 4 字节长度前缀）。"""
-    nb = name.encode("utf-16-le")
-    str_payload = len(nb) + 2
-    str_record = 8 + str_payload
-    container = 12 + str_record
+    """加入网络：容器 0x1b = u32(1) + 网络名。"""
+    inner = rec_u32(1, 0x3F) + rec_str(name, 0x06)
+    return (head(req_id, CMD_JOIN) + struct.pack(">I", len(inner))
+            + struct.pack(">I", 0x0000131B) + inner)
 
-    out = bytearray()
-    # 记录1：请求 ID
-    out += rec(4, 0x01, 0x4A) + struct.pack(">I", req_id)
-    # 记录2：命令码
-    out += rec(4, 0x01, 0x00) + struct.pack(">I", CMD_JOIN)
-    # 容器头
-    out += struct.pack(">I", container) + struct.pack(">I", CONTAINER_TAG)
-    # 记录3：u32 常量 1
-    out += rec(4, 0x0B, 0x3F) + struct.pack(">I", 1)
-    # 记录4：字符串
-    out += rec(str_payload, 0x03, 0x06) + b"\x00" + nb + b"\x01"
-    return bytes(out)
 
+def build_alias(name: str, req_id: int) -> bytes:
+    """改别名：命令码 0x12，单条字符串记录（字段 0x04）。"""
+    return head(req_id, CMD_ALIAS) + rec_str(name, 0x04)
+
+
+def build_delete(guid: bytes, req_id: int) -> bytes:
+    """删除网络：命令码 0x0f，单条 16 字节 GUID 记录。"""
+    return head(req_id, CMD_DELETE) + rec_guid(guid)
+
+
+def build_leave(guid: bytes, req_id: int) -> bytes:
+    """离开网络：命令码 0x08，GUID + u32=0（字段 0x16）。"""
+    return head(req_id, CMD_LEAVE) + rec_guid(guid) + rec_u32(0, 0x16)
+
+
+def build_enum(prefix: str, req_id: int) -> bytes:
+    """枚举公共网络：命令码 0x13，字段 0x06 是过滤前缀（空串=全部）。"""
+    return head(req_id, CMD_ENUM) + rec_str(prefix, 0x06)
+
+
+# ---------------------------------------------------------------- 管道
 
 def open_pipe():
-    """打开管道的读写实例。失败时返回 (None, 错误码)。"""
-    for attempt in range(6):
+    for _ in range(6):
         h = k32.CreateFileW(PIPE, GENERIC_READ | GENERIC_WRITE, 0, None,
                             OPEN_EXISTING, 0, None)
         if h not in (INVALID, None):
             return h, 0
         err = ctypes.get_last_error()
-        # 231 = 所有实例都在忙；稍等重试（官方 GUI 偶尔会占满）
         if err != 231:
             return None, err
         time.sleep(0.4)
@@ -110,28 +146,32 @@ def write_frame(h, body: bytes) -> int:
     return n.value
 
 
-def svc_tail(n=12):
+def svc_reqs():
     if not os.path.exists(SVC):
-        return []
+        return {}
     raw = open(SVC, "rb").read()
-    return [l.strip() for l in raw.decode("utf-16-le", "ignore").splitlines() if l.strip()][-n:]
+    out = {}
+    for line in raw.decode("utf-16-le", "ignore").splitlines():
+        m = re.search(r"\[req:(\d+)\]\s*(.+)$", line)
+        if m:
+            rid, desc = int(m.group(1)), m.group(2).strip()
+            if out.get(rid) in (None, "Succeeded") and desc != "Succeeded":
+                out[rid] = desc
+            out.setdefault(rid, desc)
+    return out
 
 
-def cmd_join(name: str, req_id: int) -> int:
-    body = build_join(name, req_id)
-    print(f"网络名   : {name}")
+def dispatch(body: bytes, req_id: int, label: str, wait: float = 6.0) -> int:
+    print(f"命令     : {label}")
     print(f"请求编号 : {req_id} (0x{req_id:x})")
     print(f"帧长度   : {len(body)} 字节（正文）")
-    print(f"名字字节 : {len(name.encode('utf-16-le'))} (UTF-16LE)")
 
     h, err = open_pipe()
     if not h:
         print(f"✗ 打开管道失败 err={err}")
         return 1
-
     try:
-        written = write_frame(h, body)
-        print(f"✓ 已写入 {written} 字节")
+        print(f"✓ 已写入 {write_frame(h, body)} 字节")
     except OSError as e:
         print(f"✗ 写入失败: {e}")
         return 2
@@ -139,61 +179,89 @@ def cmd_join(name: str, req_id: int) -> int:
         k32.CloseHandle(h)
 
     print("等待服务处理…")
-    deadline = time.time() + 10
+    deadline = time.time() + wait
+    shown = set()          # 已经打印过的描述，避免每轮重复刷同一行
+    accepted = False
+    succeeded = False
+
     while time.time() < deadline:
-        time.sleep(0.4)
-        for line in svc_tail(20):
-            if f"[req:{req_id}]" in line:
-                print(f"  服务端: {line[:120]}")
-                if "Succeeded" in line:
-                    print("\n★ 加入成功")
-                    return 0
-            if "You joined" in line:
-                print(f"  服务端: {line[:120]}")
-                print("\n★ 加入成功")
-                return 0
+        time.sleep(0.3)
+        # 一次性取出该 reqId 的所有记录，而不是只看最新一条
+        if not os.path.exists(SVC):
+            continue
+        raw = open(SVC, "rb").read()
+        for line in raw.decode("utf-16-le", "ignore").splitlines():
+            if f"[req:{req_id}]" not in line:
+                continue
+            desc = line.split(f"[req:{req_id}]", 1)[1].strip()
+            if desc in shown:
+                continue
+            shown.add(desc)
+            print(f"  服务端: {desc[:110]}")
+            if desc == "Succeeded":
+                succeeded = True
+            else:
+                accepted = True
+        if succeeded:
+            break
 
-    print("⚠ 10 秒内未在服务日志看到确认")
-    print("  可能是：网络名不匹配 / 网络需要密码 / 网络已满")
-    return 3
+    if succeeded:
+        print("\n★ 成功（服务返回 Succeeded）")
+        return 0
+    if accepted:
+        print("\n★ 已受理（该命令本就不回 Succeeded，服务已记录请求）")
+        return 0
+    print("⚠ 服务日志里没看到该请求，命令可能被丢弃")
+    return 4
 
 
-def cmd_send(hexstr: str) -> int:
-    body = bytes.fromhex(re.sub(r"[\s,]", "", hexstr))
-    h, err = open_pipe()
-    if not h:
-        print(f"✗ 打开管道失败 err={err}")
-        return 1
-    try:
-        written = write_frame(h, body)
-        print(f"✓ 已写入 {written} 字节（正文 {len(body)}）")
-    finally:
-        k32.CloseHandle(h)
-    return 0
-
-
-def cmd_build(name: str) -> int:
-    body = build_join(name, 0x17)
-    print(f"长度 {len(body)} 字节：")
-    for i in range(0, len(body), 16):
-        chunk = body[i:i + 16]
-        hexs = " ".join(f"{b:02x}" for b in chunk)
-        print(f"  {i:04x}  {hexs}")
-    return 0
+def new_req_id() -> int:
+    return int.from_bytes(os.urandom(2), "big")
 
 
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
         return 2
-    action = argv[1]
-    if action == "join" and len(argv) > 2:
-        req_id = int.from_bytes(os.urandom(2), "big")
-        return cmd_join(argv[2], req_id)
-    if action == "send" and len(argv) > 2:
-        return cmd_send(argv[2])
-    if action == "build" and len(argv) > 2:
-        return cmd_build(argv[2])
+    a = argv[1]
+
+    if a == "join" and len(argv) > 2:
+        rid = new_req_id()
+        return dispatch(build_join(argv[2], rid), rid, f"加入网络 '{argv[2]}'")
+
+    if a in ("leave", "delete") and len(argv) > 2:
+        try:
+            guid = bytes.fromhex(re.sub(r"[\s\-]", "", argv[2]))
+        except ValueError:
+            print("GUID 需要是十六进制")
+            return 2
+        rid = new_req_id()
+        body = build_leave(guid, rid) if a == "leave" else build_delete(guid, rid)
+        return dispatch(body, rid,
+                        f"{'离开' if a == 'leave' else '删除'}网络 GUID={guid.hex()}")
+
+    if a == "alias" and len(argv) > 2:
+        rid = new_req_id()
+        return dispatch(build_alias(argv[2], rid), rid, f"改别名 -> '{argv[2]}'")
+
+    if a == "enum":
+        rid = new_req_id()
+        prefix = argv[2] if len(argv) > 2 else ""
+        return dispatch(build_enum(prefix, rid), rid,
+                        f"枚举公共网络（前缀 '{prefix}'）", wait=4)
+
+    if a == "send" and len(argv) > 2:
+        body = bytes.fromhex(re.sub(r"[\s,]", "", argv[2]))
+        rid = int.from_bytes(body[8:12], "big") if len(body) >= 12 else 0
+        return dispatch(body, rid, "自定义帧")
+
+    if a == "build" and len(argv) > 2:
+        body = build_join(argv[2], 0x17)
+        print(f"长度 {len(body)} 字节：")
+        for i in range(0, len(body), 16):
+            print(f"  {i:04x}  " + " ".join(f"{b:02x}" for b in body[i:i + 16]))
+        return 0
+
     print(__doc__)
     return 2
 
