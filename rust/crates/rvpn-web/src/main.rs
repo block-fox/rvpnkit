@@ -54,6 +54,7 @@ fn main() {
     let mut addr = DEFAULT_ADDR.to_string();
     let mut open_browser = true;
     let mut agent: Option<String> = None;
+    let mut dump: Option<String> = None;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -65,6 +66,10 @@ fn main() {
             }
             "--agent" if i + 1 < args.len() => {
                 agent = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--dump" if i + 1 < args.len() => {
+                dump = Some(args[i + 1].clone());
                 i += 2;
             }
             "--no-open" => {
@@ -82,6 +87,23 @@ fn main() {
             }
             _ => i += 1,
         }
+    }
+
+    // 调试用：把原始快照写盘，方便离线分析字段结构
+    if let Some(path) = &dump {
+        match rvpn_core::pipe::PipeClient::connect(DEFAULT_PIPE) {
+            Ok(mut pipe) => {
+                match pipe.read_snapshot(std::time::Duration::from_millis(3000)) {
+                    Ok(raw) => match std::fs::write(path, &raw) {
+                        Ok(()) => println!("已写入 {} 字节到 {path}", raw.len()),
+                        Err(e) => eprintln!("写文件失败：{e}"),
+                    },
+                    Err(e) => eprintln!("读快照失败：{e}"),
+                }
+            }
+            Err(e) => eprintln!("连不上管道：{e}"),
+        }
+        return;
     }
 
     let chosen = match &agent {
@@ -370,6 +392,7 @@ fn api_state(query: &str) -> (u16, &'static str, Vec<u8>) {
                     "nodeId": m.node_id,
                     "alias": m.alias,
                     "publicIp": m.public_ip,
+                    "virtualIp": m.virtual_ip,
                 })),
                 "networkCount": st.networks.len(),
                 "memberCount": st.member_count(),

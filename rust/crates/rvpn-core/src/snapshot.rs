@@ -81,6 +81,10 @@ pub struct SelfInfo {
     pub alias: Option<String>,
     /// 本机公网出口 IP。
     pub public_ip: Option<String>,
+    /// 本机的虚拟 IPv4（快照里 26.x 的那一个）。
+    ///
+    /// 实测只有**本机**会带这个值；其他成员的虚拟 IP 不在控制面快照里。
+    pub virtual_ip: Option<String>,
 }
 
 /// 解析出来的整体状态。
@@ -168,13 +172,20 @@ fn walk(
     let mut local_node: Option<u64> = None;
     let mut local_alias: Option<String> = None;
     let mut local_ip: Option<String> = None;
+    let mut local_virtual_ip: Option<String> = None;
 
     for r in records {
         if r.ty == RecordType::Str as u8 {
             if let Some(s) = r.as_string() {
                 if s.len() <= 256 {
                     if r.field == field::ALIAS {
-                        local_alias.get_or_insert(s);
+                        // 字段 0x04 有两种含义：本机条目里放的是虚拟 IPv4（26.x），
+                        // 成员档案里放的是别名。靠「长得像不像 IPv4」区分。
+                        if looks_like_ipv4(&s) {
+                            local_virtual_ip.get_or_insert(s);
+                        } else {
+                            local_alias.get_or_insert(s);
+                        }
                     } else if r.field == field::PUBLIC_IP {
                         local_ip.get_or_insert(s);
                     }
@@ -196,6 +207,7 @@ fn walk(
                 node_id: id,
                 alias: local_alias.clone(),
                 public_ip: local_ip.clone(),
+                virtual_ip: local_virtual_ip.clone(),
             });
         }
     }
@@ -208,6 +220,13 @@ fn walk(
             _ => walk(children, networks, profiles, nodes, me, depth + 1),
         }
     }
+}
+
+/// 判断字符串是否像一个 IPv4 地址。
+fn looks_like_ipv4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u16>().is_ok())
 }
 
 fn parse_network(
