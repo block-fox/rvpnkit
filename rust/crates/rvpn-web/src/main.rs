@@ -26,7 +26,22 @@ use rvpn_core::{Commands, CommandCode, PublicNetworks, SnapshotState, DEFAULT_PI
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8788";
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    /// 把控制台输出代码页切成 UTF-8，否则中文在 GBK 控制台里是乱码。
+    fn SetConsoleOutputCP(code_page: u32) -> i32;
+}
+
+fn win_utf8_console() {
+    #[cfg(windows)]
+    unsafe {
+        SetConsoleOutputCP(65001);
+    }
+}
+
 fn main() {
+    win_utf8_console();
     let mut addr = DEFAULT_ADDR.to_string();
     let mut open_browser = true;
 
