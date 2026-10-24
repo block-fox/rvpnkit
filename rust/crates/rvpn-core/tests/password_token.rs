@@ -1,6 +1,7 @@
 //! 密码令牌算法的回归测试。
 //!
-//! 五组样本全部来自真实抓包（官方客户端），逐字节比对。
+//! 六组样本全部来自真实抓包（官方客户端），逐字节比对。
+//! 其中一组是中文密码，用来锁死「长度按 UTF-16 码元算」这一点。
 
 use rvpn_core::commands::{password_token, token_to_password};
 
@@ -28,6 +29,11 @@ const SAMPLES: &[(&str, &str)] = &[
         "cb27da578b2cda52a2c2929ffcba1bc4ce069a97ba1bfbc4bf9f51225fce\
          af27bf57ee2caa52d1c2f79f99ba70c4ba06ff97c91b8fc4da9f23225fce",
     ),
+    // 中文密码：发 = U+53D1，UTF-16LE = d1 53
+    (
+        "发发发发发发",
+        "a8973035e8dab8b6778b09a9eb2979c4e166398969e5a6d8d8faeb29",
+    ),
 ];
 
 fn hex(s: &str) -> Vec<u8> {
@@ -38,61 +44,90 @@ fn hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// 密码按 UTF-16 码元数计算长度（不是 UTF-8 字节数）。
+fn units(pw: &str) -> usize {
+    pw.encode_utf16().count()
+}
+
+/// 密码转成 UTF-16LE 字节，并补齐到 (n+1) 个 u16。
+fn padded_utf16le(pw: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for u in pw.encode_utf16() {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out.resize(2 * (units(pw) + 1), 0);
+    out
+}
+
 #[test]
 fn token_has_expected_length() {
     for (pw, _) in SAMPLES {
         let tok = password_token(pw);
         assert_eq!(
             tok.len(),
-            4 * (pw.len() + 1),
-            "{pw:?} 的长度应为 4*(n+1)"
+            4 * (units(pw) + 1),
+            "{pw:?} 的长度应为 4*(字符数+1)"
         );
     }
 }
 
 #[test]
-fn token_second_half_is_the_random_part() {
-    let tok = password_token("123456");
-    let half = 6 + 1;
-    // 后半段原样出现在令牌里；前半段与之共享低字节
-    for i in 0..half {
-        let a_lo = tok[i * 2 + 1];
-        let b_lo = tok[(half + i) * 2 + 1];
-        assert_eq!(a_lo, b_lo, "第 {i} 个 u16 的低字节应相同");
+fn token_is_two_halves_xor_and_random() {
+    for (pw, _) in SAMPLES {
+        let tok = password_token(pw);
+        let half = tok.len() / 2;
+        let pad = padded_utf16le(pw);
+
+        for i in 0..half {
+            assert_eq!(
+                tok[i] ^ tok[half + i],
+                pad[i],
+                "{pw:?} 第 {i} 字节的异或结果不对"
+            );
+        }
     }
-    // 最后一位没有对应字符，两半应完全一致
-    assert_eq!(tok[(half - 1) * 2], tok[(half + half - 1) * 2]);
-    assert_eq!(tok[(half - 1) * 2 + 1], tok[(half + half - 1) * 2 + 1]);
 }
 
 #[test]
 fn password_is_recoverable_from_token() {
     for (pw, hexs) in SAMPLES {
         let tok = hex(hexs);
-        let got = token_to_password(&tok);
-        assert_eq!(&got, pw, "从令牌反推密码失败");
+        assert_eq!(&token_to_password(&tok), pw, "从令牌反推密码失败");
     }
 }
 
 #[test]
 fn regenerating_with_the_same_random_gives_the_same_token() {
-    // 用令牌后半段的随机数重新构造，必须和原令牌逐字节一致
     for (pw, hexs) in SAMPLES {
         let tok = hex(hexs);
-        let n = pw.len();
-        let half = n + 1;
-        let rnd = &tok[half * 2..];
+        let half = tok.len() / 2;
+        let rnd = &tok[half..];
+        let pad = padded_utf16le(pw);
 
-        let mut gen = Vec::with_capacity(4 * half);
+        assert_eq!(rnd.len(), pad.len(), "{pw:?} 随机段长度不对");
+
+        let mut gen = Vec::with_capacity(tok.len());
         for i in 0..half {
-            let hi = rnd[i * 2];
-            let lo = rnd[i * 2 + 1];
-            let ch = if i < n { pw.as_bytes()[i] } else { 0 };
-            gen.push(hi ^ ch);
-            gen.push(lo);
+            gen.push(rnd[i] ^ pad[i]);
         }
         gen.extend_from_slice(rnd);
 
         assert_eq!(gen, tok, "{pw:?} 重新生成后不一致");
+    }
+}
+
+#[test]
+fn ascii_password_only_touches_even_bytes() {
+    // ASCII 的 UTF-16LE 是 (字符, 0x00)，所以只有偶数下标被异或 ——
+    // 这就是早先误以为「只异或 u16 高字节」的原因。
+    let tok = password_token("123456");
+    let half = tok.len() / 2;
+    for i in 0..half {
+        let x = tok[i] ^ tok[half + i];
+        if i % 2 == 0 && i < 12 {
+            assert_eq!(x, b'1' + (i / 2) as u8, "第 {i} 字节");
+        } else {
+            assert_eq!(x, 0, "第 {i} 字节应为 0");
+        }
     }
 }

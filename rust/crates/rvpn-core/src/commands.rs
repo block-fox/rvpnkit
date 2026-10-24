@@ -58,17 +58,23 @@ fn head(request_id: u32, code: CommandCode) -> Frame {
 /// 注意：这里按 UTF-8 字节处理密码。全部样本都是 ASCII，此时字节数等于
 /// 字符数；含中文等非 ASCII 字符时长度口径尚未验证。
 pub fn password_token(password: &str) -> Vec<u8> {
-    let pw = password.as_bytes();
-    let n = pw.len();
+    // 密码按 UTF-16LE 编码（不是 UTF-8！）。ASCII 时两者只差一个 0 字节，
+    // 所以早先用 ASCII 样本得出的「只异或高字节」其实是特例。
+    let units: Vec<u16> = password.encode_utf16().collect();
+    let n = units.len();
+
+    // 补齐到 (n+1) 个 u16：末尾多一个 0 作为填充位
+    let mut pw: Vec<u8> = Vec::with_capacity(2 * (n + 1));
+    for u in &units {
+        pw.extend_from_slice(&u.to_le_bytes());
+    }
+    pw.resize(2 * (n + 1), 0);
+
     let rnd = random_bytes_of(2 * (n + 1));
 
     let mut out = Vec::with_capacity(4 * (n + 1));
-    for i in 0..=n {
-        let hi = rnd[2 * i];
-        let lo = rnd[2 * i + 1];
-        let ch = if i < n { pw[i] } else { 0 };
-        out.push(hi ^ ch);
-        out.push(lo);
+    for i in 0..pw.len() {
+        out.push(rnd[i] ^ pw[i]);
     }
     out.extend_from_slice(&rnd);
     out
@@ -101,18 +107,23 @@ fn random_bytes_of(len: usize) -> Vec<u8> {
 ///
 /// 令牌两半的高字节异或就是密码字节；末尾那个 0 是填充位。
 pub fn token_to_password(token: &[u8]) -> String {
-    let half = token.len() / 4;
-    if half == 0 || token.len() != half * 4 {
+    let half = token.len() / 2;
+    if half < 2 || token.len() % 2 != 0 {
         return String::new();
     }
-    let mut pw = Vec::with_capacity(half);
+
+    let mut xor = Vec::with_capacity(half);
     for i in 0..half {
-        pw.push(token[i * 2] ^ token[(half + i) * 2]);
+        xor.push(token[i] ^ token[half + i]);
     }
-    while pw.last() == Some(&0) {
-        pw.pop();
-    }
-    String::from_utf8_lossy(&pw).to_string()
+    // 末尾一个 u16 是补齐位，丢掉
+    xor.truncate(half - 2);
+
+    let units: Vec<u16> = xor
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 /// 命令构造器。
