@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <RootNamespace>RvpnKit.Core</RootNamespace>
+    <Description>Radmin VPN 控制协议内核：帧编解码、命令构造、快照解析。不依赖 Windows API，可被 CLI / GUI / Agent / 其它语言通过 HTTP 复用。</Description>
+  </PropertyGroup>
+</Project>
