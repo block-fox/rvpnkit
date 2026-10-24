@@ -17,7 +17,6 @@
 //! ```
 
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText};
@@ -136,7 +135,7 @@ impl App {
             });
         }
 
-        let mut app = Self {
+        let app = Self {
             page: Page::Networks,
             state: None,
             selected_network: None,
@@ -283,7 +282,7 @@ fn install_fonts(ctx: &egui::Context) {
         if let Ok(bytes) = std::fs::read(path) {
             fonts
                 .font_data
-                .insert("cjk".to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+                .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
             if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
                 list.insert(0, "cjk".to_owned());
             }
@@ -378,7 +377,7 @@ impl eframe::App for App {
         self.status_bar(ctx);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(14)))
+            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(14.0)))
             .show(ctx, |ui| match self.page {
                 Page::Networks => self.page_networks(ui),
                 Page::Members => self.page_members(ui),
@@ -396,7 +395,7 @@ impl App {
             .frame(
                 egui::Frame::default()
                     .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(10, 14)),
+                    .inner_margin(egui::Margin::symmetric(10.0, 14.0)),
             )
             .show(ctx, |ui| {
                 ui.label(RichText::new("RvpnKit").size(20.0).color(ACCENT).strong());
@@ -435,7 +434,7 @@ impl App {
             .frame(
                 egui::Frame::default()
                     .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(14, 10)),
+                    .inner_margin(egui::Margin::symmetric(14.0, 10.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -481,7 +480,7 @@ impl App {
             .frame(
                 egui::Frame::default()
                     .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(14, 6)),
+                    .inner_margin(egui::Margin::symmetric(14.0, 6.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {

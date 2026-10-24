@@ -1,6 +1,6 @@
 ﻿[workspace]
 resolver = "2"
-members = ["crates/rvpn-core", "crates/rvpn-web"]
+members = ["crates/rvpn-core", "crates/rvpn-web", "crates/rvpn-gui"]
 
 [workspace.package]
 version = "0.1.0"
