@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using RvpnKit.Client;
 using RvpnKit.Protocol;
 using static RvpnKit.Client.Ui;
@@ -379,11 +379,11 @@ static async Task<int> JoinNetworkAsync(string name, bool dump)
     if (!pipe.CanWrite)
     {
         Console.Error.WriteLine("✗ 当前连接是只读的，无法下发命令。");
-        Console.Error.WriteLine("  原因：读写打开被拒（错误 5）。已排查确认是本机安全软件的");
-        Console.Error.WriteLine("  「程序控制 / IPC 保护」拦截了未签名程序对其它进程管道的写入");
-        Console.Error.WriteLine("  —— 同为子进程的 Python 能写，唯独新编译的本程序被拒。");
-        Console.Error.WriteLine("  解决办法：把 rvpnkit.exe 加入安全软件白名单；");
-        Console.Error.WriteLine("  或直接用 native/rvpncmd.py 下发命令（立即可用）。");
+        Console.Error.WriteLine("  原因：读写打开被拒（错误 5）。实测是完整性级别问题：");
+        Console.Error.WriteLine("  受限环境派生的子进程运行在 Low 完整性，而 Radmin 控制管道");
+        Console.Error.WriteLine("  要求 Medium 才允许写入（读不受影响）。");
+        Console.Error.WriteLine("  解决办法：直接在资源管理器里双击运行 rvpnkit.exe");
+        Console.Error.WriteLine("  （普通用户启动即为 Medium 完整性），读写都会正常。");
         return 2;
     }
 

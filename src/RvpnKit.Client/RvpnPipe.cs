@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.Win32.SafeHandles;
@@ -60,16 +60,19 @@ public sealed class RvpnPipe : IDisposable
     /// <summary>
     /// 打开管道。
     ///
-    /// <para>用 <see cref="IntPtr"/> 接收句柄再手工包装成 <c>SafeFileHandle</c>，
-    /// 这样能第一时间拿到 Win32 错误码，不会被安全句柄的释放流程清成 0。</para>
+    /// <para><b>关于读写打开被拒（错误 5）的真实原因：完整性级别。</b>
+    /// 实测：由受限环境派生的子进程运行在 <c>Low</c> 完整性（0x1000），而
+    /// Radmin 控制管道的强制完整性策略要求 <c>Medium</c> 才允许写入 ——
+    /// 于是同一时刻读能成功、写被拒，且与可执行文件是否签名无关。
+    /// 由用户正常双击启动（Medium 完整性）时读写均正常。</para>
     ///
-    /// <para><b>读写打开被拒（错误 5）的排查结论：</b>本机实测，同样的
-    /// <c>CreateFileW</c> 参数，Python 子进程能成功打开读写，而新编译的
-    /// C/C# 程序一律失败、只读却能成功。三者都是同一个 shell 的子进程、同一个
-    /// 用户、同一时刻 —— 差别只在于可执行文件是否被安全软件信任。
-    /// 也就是说这不是本客户端的问题，而是安全软件的「程序控制 / IPC 保护」
-    /// 拦截了未签名程序写别的进程的管道。把 rvpnkit.exe 加入安全软件白名单，
-    /// 或直接用附带的 Python 工具（native/rvpncmd.py）下发命令即可。</para>
+    /// <para>补充实测数据：</para>
+    /// <code>
+    ///   进程完整性 Low + GENERIC_READ            -> 打开成功
+    ///   进程完整性 Low + GENERIC_WRITE           -> 错误 5
+    ///   进程完整性 Low + FILE_APPEND_DATA|SYNC   -> 打开成功但 WriteFile 错误 5
+    ///   进程完整性 Medium（普通用户启动）         -> 读写均正常
+    /// </code>
     /// </summary>
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateFileW(
@@ -119,7 +122,7 @@ public sealed class RvpnPipe : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         // 先试读写：成功则具备下发命令的能力
-        var raw = CreateFileW(PipeName, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero,
+        var raw = CreateFileW(PipeName, (GENERIC_READ | GENERIC_WRITE), 0, IntPtr.Zero,
                               OPEN_EXISTING, 0, IntPtr.Zero);
         int rwErr = Marshal.GetLastWin32Error();
         if (Environment.GetEnvironmentVariable("RVPNKIT_DEBUG_PIPE") == "1")
