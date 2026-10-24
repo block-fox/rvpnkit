@@ -2,6 +2,23 @@
 
 **Radmin VPN 第三方客户端** —— 高性能、高稳定的增强型控制工具。
 
+## 直接下载
+
+**[⬇ RvpnKit 0.2.0 (Windows, 2.7 MB)](https://github.com/block-fox/rvpnkit/releases/latest)**
+
+解压后两个程序，任选其一：
+
+| 文件 | 说明 |
+|---|---|
+| `rvpnkit-gui.exe` | 图形窗口，**主力**，4.9 MB，无运行时依赖 |
+| `rvpnkit.exe` | 本地网页版，备用 / 跨平台 / 可远程 |
+
+无需安装官方客户端之外的任何东西；不需要 MSVC、不需要 .NET 运行时。
+
+![界面](docs/gui-networks.png)
+
+
+
 > ⚠️ **免责声明**：本项目通过逆向分析实现了与 Radmin VPN 本地服务的互操作。
 > 仅供**个人学习与自用**。Famatech 的 EULA 可能禁止此类行为，
 > 使用存在**账号被封禁**的风险。请自行评估并承担后果。
