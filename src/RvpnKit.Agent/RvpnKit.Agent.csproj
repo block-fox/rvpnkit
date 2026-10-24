@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>rvpnkit-agent</AssemblyName>
+    <RootNamespace>RvpnKit.Agent</RootNamespace>
+    <Description>Radmin VPN 控制面 HTTP API。把本地命名管道的能力暴露成跨平台可调用的 REST 接口。</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RvpnKit.Core\RvpnKit.Core.csproj" />
+  </ItemGroup>
+</Project>
