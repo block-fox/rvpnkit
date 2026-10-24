@@ -30,17 +30,79 @@ static HANDLE g_log = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION g_lock;
 static BOOL g_lockReady = FALSE;
 static void *g_realWrite = NULL;
+static void *g_realTransact = NULL;
 static volatile LONG g_frames = 0;
+static volatile LONG g_is_reply = 0;
+
+/* 前向声明：下面的 TransactNamedPipe 钩子先用到这几个，定义在后面 */
+static BOOL is_radmin_frame(const void *buf, DWORD n);
+static void dump_frame(const void *data, DWORD len);
 
 typedef BOOL(WINAPI *WriteFile_t)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+typedef BOOL(WINAPI *TransactNamedPipe_t)(HANDLE, LPVOID, DWORD, LPVOID, DWORD,
+                                          LPDWORD, LPOVERLAPPED);
+
+/*
+ * 有些命令不走 WriteFile 而走 TransactNamedPipe（同步请求-应答）。
+ * 实测：点界面上的电源开关触发了服务端 "Switched Off / Switched On"，
+ * 但只 hook WriteFile 时一条都没抓到 —— 就是因为它走的是这个 API。
+ */
+static BOOL WINAPI hook_TransactNamedPipe(HANDLE h, LPVOID w, DWORD nw,
+                                          LPVOID r, DWORD nr, LPDWORD got,
+                                          LPOVERLAPPED ov)
+{
+    TransactNamedPipe_t real = (TransactNamedPipe_t)g_realTransact;
+    DWORD cb = 0;
+    BOOL ok;
+
+    if (w && nw <= 1024 * 1024 && is_radmin_frame(w, nw)) {
+        if (g_lockReady) EnterCriticalSection(&g_lock);
+        dump_frame(w, nw);
+        InterlockedIncrement(&g_frames);
+        if (g_lockReady) LeaveCriticalSection(&g_lock);
+    }
+
+    ok = real(h, w, nw, r, nr, &cb, ov);
+
+    if (ok && r && cb) {
+        DWORD safe = (cb < nr) ? cb : nr;
+        if (safe && is_radmin_frame(r, safe)) {
+            if (g_lockReady) EnterCriticalSection(&g_lock);
+            g_is_reply = 1;
+            dump_frame(r, safe);
+            g_is_reply = 0;
+            if (g_lockReady) LeaveCriticalSection(&g_lock);
+        }
+    }
+    if (got) *got = cb;
+    return ok;
+}
 
 /* Radmin 控制帧的信封魔数，两个方向都一样 */
 static const BYTE g_magic[6] = { 0x00, 0x00, 0x00, 0x04, 0x01, 0x00 };
 
 static BOOL is_radmin_frame(const void *buf, DWORD n)
 {
-    if (!buf || n < sizeof(g_magic)) return FALSE;
-    return memcmp(buf, g_magic, sizeof(g_magic)) == 0;
+    const BYTE *p = (const BYTE *)buf;
+    if (!buf || n < 8) return FALSE;
+
+    /* 常规情况：信封魔数 */
+    if (memcmp(buf, g_magic, sizeof(g_magic)) == 0) return TRUE;
+
+    /*
+     * 放宽判定。
+     *
+     * 早先只认魔数，结果点界面上的电源开关时一条都抓不到 —— 尽管服务端
+     * 确实记录了 Switched Off/On。说明那种命令的首记录与常规命令不同。
+     * 这里再接受「首 4 字节是大端的合理长度，且第 7 字节是记录里的 0x03」
+     * 的形状，尽量不漏。宁可多记一点噪音，事后还能筛。
+     */
+    {
+        DWORD size = ((DWORD)p[0] << 24) | ((DWORD)p[1] << 16)
+                   | ((DWORD)p[2] << 8) | (DWORD)p[3];
+        if (size <= n - 8 && p[6] == 0x03) return TRUE;
+    }
+    return FALSE;
 }
 
 static void timestamp(char *out, size_t cap)
@@ -64,8 +126,7 @@ static void dump_frame(const void *data, DWORD len)
     timestamp(ts, sizeof(ts));
 
     off += (size_t)sprintf_s(buf + off, sizeof(buf) - off,
-                             "\n=== %s len=%lu%s ===\nHEX:\n",
-                             ts, len, (len > shown) ? " TRUNCATED" : "");
+                             "\\n=== %s %s len=%lu%s ===\\nHEX:\\n", ts, g_is_reply ? "IN " : "OUT", len, (len > shown) ? " TRUNCATED" : "");
 
     for (i = 0; i < shown && off + 8 < sizeof(buf); i++) {
         off += (size_t)sprintf_s(buf + off, sizeof(buf) - off, "%02x ", p[i]);

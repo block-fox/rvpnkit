@@ -46,6 +46,7 @@ SVC = r"C:\ProgramData\Famatech\Radmin VPN\service.log"
 
 CMD_CREATE = 0x02
 CMD_JOIN = 0x03
+CMD_SWITCH_POWER = 0x04
 CMD_LEAVE = 0x05
 CMD_KICK = 0x06
 CMD_SET_ENABLED = 0x08
@@ -147,6 +148,17 @@ def build_member_op(code: int, guid: bytes, node_id: int, name: str,
             + rec_str(name, 0x06))
 
 
+def build_power(on: bool, req_id: int) -> bytes:
+    """VPN 总开关（CSwitchPower）：命令码 0x04，字段 0x11，1=开 0=关。
+
+    这条是通过「按码分组 + 逐字段二分」扫出来的：码 0x04 下的
+    字段 0x11、类型 0x0b 一触发，服务日志立刻出现
+        Switched Off → Disconnected from server(code:4)
+        Switched On  → Connected to server (15)
+    """
+    return head(req_id, CMD_SWITCH_POWER) + rec_u32(1 if on else 0, 0x11)
+
+
 def build_set_enabled(guid: bytes, enabled: bool, req_id: int) -> bytes:
     """启用 / 禁用网络：命令码 0x08，GUID + 字段 0x16（0=禁用 1=启用）。
 
@@ -212,7 +224,8 @@ def svc_reqs():
     return out
 
 
-def dispatch(body: bytes, req_id: int, label: str, wait: float = 6.0) -> int:
+def dispatch(body: bytes, req_id: int, label: str, wait: float = 6.0,
+             watch: str | None = None) -> int:
     print(f"命令     : {label}")
     print(f"请求编号 : {req_id} (0x{req_id:x})")
     print(f"帧长度   : {len(body)} 字节（正文）")
@@ -231,33 +244,39 @@ def dispatch(body: bytes, req_id: int, label: str, wait: float = 6.0) -> int:
 
     print("等待服务处理…")
     deadline = time.time() + wait
-    shown = set()          # 已经打印过的描述，避免每轮重复刷同一行
+    shown = set()
     accepted = False
     succeeded = False
+    watched = False
 
     while time.time() < deadline:
         time.sleep(0.3)
-        # 一次性取出该 reqId 的所有记录，而不是只看最新一条
         if not os.path.exists(SVC):
             continue
         raw = open(SVC, "rb").read()
         for line in raw.decode("utf-16-le", "ignore").splitlines():
-            if f"[req:{req_id}]" not in line:
-                continue
-            desc = line.split(f"[req:{req_id}]", 1)[1].strip()
-            if desc in shown:
-                continue
-            shown.add(desc)
-            print(f"  服务端: {desc[:110]}")
-            if desc == "Succeeded":
-                succeeded = True
-            else:
-                accepted = True
-        if succeeded:
+            if f"[req:{req_id}]" in line:
+                desc = line.split(f"[req:{req_id}]", 1)[1].strip()
+                if desc in shown:
+                    continue
+                shown.add(desc)
+                print(f"  服务端: {desc[:110]}")
+                if desc == "Succeeded":
+                    succeeded = True
+                else:
+                    accepted = True
+            elif watch and watch in line and line not in shown:
+                shown.add(line)
+                print(f"  服务端: {line.strip()[-60:]}")
+                watched = True
+        if succeeded or (watch and watched):
             break
 
     if succeeded:
         print("\n★ 成功（服务返回 Succeeded）")
+        return 0
+    if watched:
+        print("\n★ 成功（状态已切换）")
         return 0
     if accepted:
         print("\n★ 已受理（该命令本就不回 Succeeded，服务已记录请求）")
@@ -293,6 +312,18 @@ def main(argv):
             body = build_set_enabled(guid, a == "enable", rid)
             label = f"{'启用' if a == 'enable' else '禁用'}网络 GUID={guid.hex()}"
         return dispatch(body, rid, label)
+
+    if a in ("power", "on", "off"):
+        on = a != "off"
+        if a == "power":
+            if len(argv) < 3:
+                print("用法: rvpncmd.py power on|off")
+                return 2
+            on = argv[2].lower() in ("on", "1", "true", "yes")
+        rid = new_req_id()
+        return dispatch(build_power(on, rid), rid,
+                        f"VPN 总开关 -> {'开启' if on else '关闭'}", wait=8,
+                        watch="Switched")
 
     if a == "create" and len(argv) > 2:
         rid = new_req_id()

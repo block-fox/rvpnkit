@@ -308,3 +308,51 @@ python native\rvpnstate.py --json   # 机器可读
 用 GUID / 节点 / 空载荷 / 各种 u32 字段共扫了约 600 次请求均无响应，
 下一步需要从 GUI 侧找到 `CSwitchPower` 的构造点，或反汇编 12 字节消息 ID
 的分派表（`0x444xxx` 那段按 12 字节比较来分派）。
+
+---
+
+## 十、VPN 总开关（CSwitchPower）已打通
+
+命令码 **`0x04`**，载荷只有一个 u32 字段 **`0x11`**（1=开 0=关）：
+
+```
+00 00 00 04 01 00 03 4a | reqId
+00 00 00 04 01 00 03 00 | 00 00 00 04        ← 命令码 4
+00 00 00 04 0b 00 03 11 | 00 00 00 <0 或 1>  ← 字段 0x11
+```
+
+实测：
+
+```
+Switched Off → Disconnected from server(code:4)
+Switched On  → Connected to server (15)
+```
+
+### 怎么找到的
+
+两条常规路都失败后才挖出来的，值得记录：
+
+1. **抓包失败**：点界面电源徽标，服务端确实记了 `Switched Off`，
+   但 hook 一个字节都没抓到。先后补了 `TransactNamedPipe` 钩子、
+   放宽了帧过滤（不再只认信封魔数），依然为空 ——
+   说明这条命令**既不走 WriteFile 也不走 TransactNamedPipe**。
+2. **静态定位不完整**：服务端有 `CSwitchPower` 的 RTTI 与 vtable，
+   但 GUI 里没有该类名，反查构造点无果。
+3. **最终靠分组爆破**：把剩余码位（1/4/7/9/11/12/13/14/19~26）×
+   32 个字段 × 2 种类型逐组发送，每发完一组检查新出现的 `Switched` 行。
+   码 `0x04` 那组命中，再在该码内逐字段二分，锁定字段 `0x11`、类型 `0x0b`。
+
+### 注意
+
+`Switched On/Off` 这两行**不带 `[req:N]`**，所以工具的完成判定要额外
+监听 `Switched` 关键字，不能只看 `Succeeded`。
+
+## 十一、仍未定位：CUpdateNetwork（网络改名）
+
+类名与日志模板（`Requested to update network '%ls'`）都已确认，但试过：
+GUID+名字（裸记录）、GUID+名字装进容器 `0x1323`/`0x132b`/`0x1321`/`0x1325`、
+码位 0x00~0xC0 全扫 —— 均无响应。
+
+推测它需要完整的网络对象序列化（`IManageNetwork` / `CTaskCompleted_AbstractManageNetwork`
+这两个接口暗示改名走的是「托管网络」通道，而不是简单的字段组合）。
+下一步可以从 `CManageNetwork` 的序列化函数入手。
