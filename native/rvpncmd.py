@@ -44,9 +44,9 @@ import time
 PIPE = r"\\.\pipe\RadminVpnGuiChannel"
 SVC = r"C:\ProgramData\Famatech\Radmin VPN\service.log"
 
-CMD_CREATE_OR_LEAVE = 0x02
+CMD_CREATE = 0x02
 CMD_JOIN = 0x03
-CMD_LEAVE = 0x08
+CMD_SET_ENABLED = 0x08
 CMD_DELETE = 0x0F
 CMD_ALIAS = 0x12
 CMD_ENUM = 0x13
@@ -112,14 +112,35 @@ def build_delete(guid: bytes, req_id: int) -> bytes:
     return head(req_id, CMD_DELETE) + rec_guid(guid)
 
 
-def build_leave(guid: bytes, req_id: int) -> bytes:
-    """离开网络：命令码 0x08，GUID + u32=0（字段 0x16）。"""
-    return head(req_id, CMD_LEAVE) + rec_guid(guid) + rec_u32(0, 0x16)
-
-
 def build_enum(prefix: str, req_id: int) -> bytes:
     """枚举公共网络：命令码 0x13，字段 0x06 是过滤前缀（空串=全部）。"""
     return head(req_id, CMD_ENUM) + rec_str(prefix, 0x06)
+
+
+def build_set_enabled(guid: bytes, enabled: bool, req_id: int) -> bytes:
+    """启用 / 禁用网络：命令码 0x08，GUID + 字段 0x16（0=禁用 1=启用）。
+
+    这条是从服务日志确认的：
+        13:13:35 Disabled network '91919191免费'  ← 帧里 0x16 的值是 0
+        13:13:36 Enabled  network '91919191免费'  ← 帧里 0x16 的值是 1
+    两条帧的 GUID 完全相同，只有末尾 u32 不同。
+    """
+    return head(req_id, CMD_SET_ENABLED) + rec_guid(guid) + rec_u32(1 if enabled else 0, 0x16)
+
+
+def build_create(name: str, req_id: int, key: bytes | None = None) -> bytes:
+    """创建网络：命令码 0x02，容器 0x2b = u32(0) + 名字 + 28 字节网络密钥。
+
+    28 字节块由客户端随机生成：同名网络两次创建（reqId 41/44），块内容完全
+    不同，所以它不是名字的哈希。这里默认用 os.urandom(28) 生成。
+    """
+    if key is None:
+        key = os.urandom(28)
+    assert len(key) == 28, f"网络密钥必须 28 字节，实际 {len(key)}"
+    inner = (rec_u32(0, 0x08) + rec_str(name, 0x06)
+             + rec(len(key), 0x08, 0x0D) + key)
+    return (head(req_id, CMD_CREATE) + struct.pack(">I", len(inner))
+            + struct.pack(">I", 0x0000132B) + inner)
 
 
 # ---------------------------------------------------------------- 管道
@@ -229,16 +250,24 @@ def main(argv):
         rid = new_req_id()
         return dispatch(build_join(argv[2], rid), rid, f"加入网络 '{argv[2]}'")
 
-    if a in ("leave", "delete") and len(argv) > 2:
+    if a in ("enable", "disable", "delete") and len(argv) > 2:
         try:
             guid = bytes.fromhex(re.sub(r"[\s\-]", "", argv[2]))
         except ValueError:
             print("GUID 需要是十六进制")
             return 2
         rid = new_req_id()
-        body = build_leave(guid, rid) if a == "leave" else build_delete(guid, rid)
-        return dispatch(body, rid,
-                        f"{'离开' if a == 'leave' else '删除'}网络 GUID={guid.hex()}")
+        if a == "delete":
+            body, label = build_delete(guid, rid), f"删除网络 GUID={guid.hex()}"
+        else:
+            body = build_set_enabled(guid, a == "enable", rid)
+            label = f"{'启用' if a == 'enable' else '禁用'}网络 GUID={guid.hex()}"
+        return dispatch(body, rid, label)
+
+    if a == "create" and len(argv) > 2:
+        rid = new_req_id()
+        body = build_create(argv[2], rid)
+        return dispatch(body, rid, f"创建网络 '{argv[2]}'")
 
     if a == "alias" and len(argv) > 2:
         rid = new_req_id()
