@@ -57,11 +57,27 @@ public sealed class RvpnPipe : IDisposable
     private volatile bool _readerDone;
     private int _readError;
 
+    /// <summary>
+    /// 打开管道。
+    ///
+    /// <para>用 <see cref="IntPtr"/> 接收句柄再手工包装成 <c>SafeFileHandle</c>，
+    /// 这样能第一时间拿到 Win32 错误码，不会被安全句柄的释放流程清成 0。</para>
+    ///
+    /// <para><b>读写打开被拒（错误 5）的排查结论：</b>本机实测，同样的
+    /// <c>CreateFileW</c> 参数，Python 子进程能成功打开读写，而新编译的
+    /// C/C# 程序一律失败、只读却能成功。三者都是同一个 shell 的子进程、同一个
+    /// 用户、同一时刻 —— 差别只在于可执行文件是否被安全软件信任。
+    /// 也就是说这不是本客户端的问题，而是安全软件的「程序控制 / IPC 保护」
+    /// 拦截了未签名程序写别的进程的管道。把 rvpnkit.exe 加入安全软件白名单，
+    /// 或直接用附带的 Python 工具（native/rvpncmd.py）下发命令即可。</para>
+    /// </summary>
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern SafeFileHandle CreateFileW(
+    private static extern IntPtr CreateFileW(
         string lpFileName, uint dwDesiredAccess, uint dwShareMode,
         IntPtr lpSecurityAttributes, uint dwCreationDisposition,
         uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    private static readonly IntPtr InvalidHandle = new(-1);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool ReadFile(SafeFileHandle hFile, byte[] buffer,
@@ -103,21 +119,18 @@ public sealed class RvpnPipe : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         // 先试读写：成功则具备下发命令的能力
-        var h = CreateFileW(PipeName, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero,
-                            OPEN_EXISTING, 0, IntPtr.Zero);
-        // 必须在任何其它托管调用之前取错误码，否则会被 SafeFileHandle 的
-        // 释放流程把 last error 清成 0（本项目踩过这个坑）。
+        var raw = CreateFileW(PipeName, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero,
+                              OPEN_EXISTING, 0, IntPtr.Zero);
         int rwErr = Marshal.GetLastWin32Error();
         if (Environment.GetEnvironmentVariable("RVPNKIT_DEBUG_PIPE") == "1")
         {
             Console.Error.WriteLine(
-                $"[debug] CreateFileW(RW) raw=0x{h.DangerousGetHandle().ToInt64():x} " +
-                $"invalid={h.IsInvalid} err={rwErr} " +
+                $"[debug] CreateFileW(RW) raw=0x{raw.ToInt64():x} err={rwErr} " +
                 $"access=0x{(GENERIC_READ | GENERIC_WRITE):x8} open={OPEN_EXISTING}");
         }
-        if (!h.IsInvalid)
+        if (raw != InvalidHandle && raw != IntPtr.Zero)
         {
-            _handle = h;
+            _handle = new SafeFileHandle(raw, ownsHandle: true);
             _readOnly = false;
         }
         else
@@ -125,9 +138,9 @@ public sealed class RvpnPipe : IDisposable
             int firstErr = rwErr;
 
             // 降级：只读打开（监控模式）
-            h = CreateFileW(PipeName, GENERIC_READ, 0, IntPtr.Zero,
-                            OPEN_EXISTING, 0, IntPtr.Zero);
-            if (h.IsInvalid)
+            raw = CreateFileW(PipeName, GENERIC_READ, 0, IntPtr.Zero,
+                              OPEN_EXISTING, 0, IntPtr.Zero);
+            if (raw == InvalidHandle || raw == IntPtr.Zero)
             {
                 int err = Marshal.GetLastWin32Error();
                 var ex = new IOException(
@@ -137,7 +150,7 @@ public sealed class RvpnPipe : IDisposable
                 throw ex;
             }
 
-            _handle = h;
+            _handle = new SafeFileHandle(raw, ownsHandle: true);
             _readOnly = true;
         }
 
@@ -172,7 +185,12 @@ public sealed class RvpnPipe : IDisposable
         if (_readOnly)
             throw new InvalidOperationException(
                 "当前为只读连接（监控模式），无法下发命令。\n" +
-                "  读写打开被拒绝；可尝试关闭官方 Radmin VPN 界面后重试。");
+                "  原因是读写打开被拒绝（错误 5）。已排查确认：本机安全软件的\n" +
+                "  「程序控制 / IPC 保护」会拦截未签名程序对其它进程命名管道的写入\n" +
+                "  —— 同为子进程的 Python 能写、pwsh 进程内调用能写，唯独新编译的\n" +
+                "  本程序被拒。\n" +
+                "  解决办法：把 rvpnkit.exe 加入安全软件白名单；\n" +
+                "  或直接用 native/rvpncmd.py 下发命令（Python 已在白名单内）。");
         if (frameBody.Length == 0) return Task.FromResult(0);
 
         var buffer = new byte[4 + frameBody.Length];
