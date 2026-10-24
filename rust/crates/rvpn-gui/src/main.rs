@@ -735,10 +735,17 @@ impl App {
             return;
         };
         let p = self.palette;
-        let net_name = self
+        let (net_name, role_text) = self
             .current_network()
-            .map(|n| n.name.clone())
-            .unwrap_or_default();
+            .map(|n| {
+                let r = match n.role {
+                    Some(2) => "管理员（你是创建者）",
+                    Some(1) => "普通成员",
+                    _ => "—（未知）",
+                };
+                (n.name.clone(), r)
+            })
+            .unwrap_or_else(|| (String::new(), "—"));
         let mut close = false;
 
         egui::Window::new("props")
@@ -812,7 +819,14 @@ impl App {
             ui.add_space(10.0);
             ui.label(RichText::new("连接").size(11.5).strong().color(p.accent));
             ui.add_space(4.0);
-            for k in ["角色", "虚拟 IPv4", "虚拟 IPv6", "状态", "通道类型"] {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [92.0, 18.0],
+                    egui::Label::new(RichText::new("角色").size(12.5).color(p.muted)),
+                );
+                ui.label(RichText::new(role_text).size(12.5).color(p.ok));
+            });
+            for k in ["虚拟 IPv4", "虚拟 IPv6", "状态", "通道类型"] {
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [92.0, 18.0],
@@ -1527,7 +1541,7 @@ impl App {
                     "抓到的创建与加入请求都是免密码网络；撞过 57 个候选字段号都没命中，密码不在普通字符串字段里。需要一个带密码网络的抓包样本。",
                 ),
                 (
-                    "成员的虚拟 IP / IPv6 / 角色 / 通道类型",
+                    "成员的虚拟 IP / IPv6 / 通道类型",
                     "这些属于数据面信息，控制面快照只提供别名、公网 IP 和节点 ID。",
                 ),
                 (

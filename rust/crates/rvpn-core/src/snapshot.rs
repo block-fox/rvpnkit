@@ -39,6 +39,9 @@ pub struct NetworkInfo {
     /// 快照字段 `0x47` 的字符串。含义未确认：多个网络取值相同，且其中多数是免密码
     /// 加入的，所以大概率不是密码，更像某种会话令牌。
     pub token: Option<String>,
+    /// 我在这个网络里的角色。实测：`2` = 管理员（我是创建者），`1` = 普通成员。
+    /// 这是快照里唯一一个能反映角色的字段（字段号 `0x0a`）。
+    pub role: Option<u32>,
     /// 该网络下的成员。
     pub members: Vec<MemberInfo>,
 }
@@ -106,7 +109,7 @@ impl SnapshotState {
 
     /// 解析快照。
     pub fn parse(raw: &[u8]) -> Self {
-        let mut networks: Vec<(String, Vec<u8>, Option<String>, Vec<u64>)> = Vec::new();
+        let mut networks: Vec<(String, Vec<u8>, Option<String>, Option<u32>, Vec<u64>)> = Vec::new();
         let mut profiles: HashMap<u64, (Option<String>, Option<String>)> = HashMap::new();
         let mut nodes: BTreeSet<u64> = BTreeSet::new();
         let mut me: Option<SelfInfo> = None;
@@ -130,8 +133,8 @@ impl SnapshotState {
         let mut seen = HashSet::new();
         let nets = networks
             .into_iter()
-            .filter(|(name, guid, _, _)| seen.insert((name.clone(), guid.clone())))
-            .map(|(name, guid, token, member_ids)| {
+            .filter(|(name, guid, _, _, _)| seen.insert((name.clone(), guid.clone())))
+            .map(|(name, guid, token, role, member_ids)| {
                 let members = member_ids
                     .into_iter()
                     .map(|id| {
@@ -147,6 +150,7 @@ impl SnapshotState {
                     name,
                     guid,
                     token,
+                    role,
                     members,
                 }
             })
@@ -162,7 +166,7 @@ impl SnapshotState {
 
 fn walk(
     records: &[Record],
-    networks: &mut Vec<(String, Vec<u8>, Option<String>, Vec<u64>)>,
+    networks: &mut Vec<(String, Vec<u8>, Option<String>, Option<u32>, Vec<u64>)>,
     profiles: &mut HashMap<u64, (Option<String>, Option<String>)>,
     nodes: &mut BTreeSet<u64>,
     me: &mut Option<SelfInfo>,
@@ -231,13 +235,14 @@ fn looks_like_ipv4(s: &str) -> bool {
 
 fn parse_network(
     children: &[Record],
-    networks: &mut Vec<(String, Vec<u8>, Option<String>, Vec<u64>)>,
+    networks: &mut Vec<(String, Vec<u8>, Option<String>, Option<u32>, Vec<u64>)>,
     nodes: &mut BTreeSet<u64>,
 ) {
     let mut name: Option<String> = None;
     let mut token: Option<String> = None;
     let mut guid: Option<Vec<u8>> = None;
     let mut members: Vec<u64> = Vec::new();
+    let mut role: Option<u32> = None;
 
     for c in children {
         if c.ty == RecordType::Guid as u8
@@ -254,6 +259,9 @@ fn parse_network(
                     token.get_or_insert(s);
                 }
             }
+        }
+        if c.field == 0x0a && matches!(c.ty, 0x01 | 0x0b) && c.payload.len() >= 4 {
+            role = Some(c.as_u32());
         }
         if c.field == F_CONTAINER_MEMBER {
             if let Some(grand) = &c.children {
@@ -274,7 +282,7 @@ fn parse_network(
     }
 
     if let (Some(name), Some(guid)) = (name, guid) {
-        networks.push((name, guid, token, members));
+        networks.push((name, guid, token, role, members));
     }
 }
 

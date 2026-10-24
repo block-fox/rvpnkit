@@ -377,6 +377,7 @@ fn api_state(query: &str) -> (u16, &'static str, Vec<u8>) {
                         "name": n.name,
                         "guid": n.guid_hex(),
                         "token": n.token,
+                        "role": n.role,
                         "members": n.members.iter().map(|m| serde_json::json!({
                             "nodeId": m.node_id,
                             "alias": m.alias,
