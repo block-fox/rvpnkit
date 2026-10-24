@@ -356,3 +356,55 @@ GUID+名字（裸记录）、GUID+名字装进容器 `0x1323`/`0x132b`/`0x1321`/
 推测它需要完整的网络对象序列化（`IManageNetwork` / `CTaskCompleted_AbstractManageNetwork`
 这两个接口暗示改名走的是「托管网络」通道，而不是简单的字段组合）。
 下一步可以从 `CManageNetwork` 的序列化函数入手。
+
+---
+
+## 十二、公共网络：286 个可选网络，支持搜索与一键加入
+
+`CEnumPublicNetworks`（码 `0x13`）**不写日志、也不在快照里** —— 结果是以
+管道响应的形式回来的。所以必须「发命令的同时读响应」。
+
+`native/rvpnpublic.py` 的做法：打开读写管道 → 发枚举请求 → 收 4 秒响应 →
+从响应帧里按字段 `0x06` 抽出网络名 → 减去已加入的 13 个，剩下就是可加入的
+公共网络。实测一次拿到 **286 个**：
+
+```
+Minecraft [中文 5]          Valorant [English 1]
+KartRider: Drift [中文 1]   Diablo II: Resurrected [中文 1]
+DOTA [English 1..7]         Terraria [中文 1]
+Roblox [English 1..3]       CS: 1.5 [中文 1]
+```
+
+用法：
+
+```powershell
+python native\rvpnpublic.py                      # 列出全部
+python native\rvpnpublic.py --search Valorant    # 过滤
+python native\rvpnpublic.py join Valorant        # 一键加入
+```
+
+实测：
+
+```
+匹配 2 个，取第一个: Valorant [English 1]
+[req:37137] Requested to join network 'Valorant [English 1]' without password
+Succeeded
+```
+
+## 十三、功能完成度
+
+| 功能 | 状态 | 实现 |
+|---|---|---|
+| 网络电源开关 | ✅ | 码 `0x04` 字段 `0x11` |
+| 网络启用/禁用 | ✅ | 码 `0x08` + GUID + 字段 `0x16` |
+| 加入网络 | ✅ | 码 `0x03` |
+| 创建网络 | ✅ | 码 `0x02`（28 字节随机密钥） |
+| 删除网络 | ✅ | 码 `0x0f` + GUID |
+| 离开网络 | ✅ | 码 `0x05` + GUID |
+| 改别名 | ✅ | 码 `0x12` |
+| 踢出成员 | ✅ | 码 `0x06` |
+| 批准加入 | ✅ | 码 `0x0a` |
+| 授予/撤销管理员 | ✅ | 码 `0x10` / `0x11` |
+| 成员列表 + IP + 别名 | ✅ | C# 客户端（`rvpnkit`） |
+| 公共网络搜索与一键加入 | ✅ | 286 个，`rvpnpublic.py` |
+| 网络改名 | ❌ | `CUpdateNetwork` 载荷结构未破 |
