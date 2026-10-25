@@ -15,6 +15,7 @@ pub fn state_json(state: &SnapshotState, can_write: bool, demo: bool) -> Value {
         "nodeCount": state.nodes.len(),
         "networks": state.networks.iter().map(|n| json!({
             "name": n.name, "guid": n.guid_hex(), "role": n.role, "networkType":n.network_type,
+            "publicNetwork": n.is_public_name(),
             "enabled":n.enabled,"blockNewMembers":n.block_new_members,"allowPasswordless":n.allow_passwordless,"community":n.community,
             "members": n.members.iter().map(|m| json!({
                 "nodeId": m.node_id.to_string(), "alias": m.alias, "publicIp": m.public_ip, "cloudNodeIp": m.public_ip,

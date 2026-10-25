@@ -30,6 +30,7 @@ use theme::Palette;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText};
@@ -139,6 +140,8 @@ struct App {
     backend: String,
     palette: Palette,
     measured_latency: HashMap<String, Option<u32>>,
+    api_handle: Option<rvpn_core::api::ApiHandle>,
+    firewall_ip: String,
 }
 
 impl App {
@@ -272,7 +275,10 @@ impl App {
             backend: "直连管道".into(),
             palette: Palette::by_dark(dark),
             measured_latency: HashMap::new(),
+            api_handle: None,
+            firewall_ip: String::new(),
         };
+        app.restart_read_api();
         if demo {
             app.state = Some(rvpn_core::presentation::demo_state());
             app.busy = false;
@@ -285,6 +291,28 @@ impl App {
             app.submit(Job::Refresh);
         }
         app
+    }
+
+    fn restart_read_api(&mut self) {
+        self.api_handle.take();
+        if self.demo || !self.preferences.api.enabled {
+            return;
+        }
+        let config = self.preferences.api.clone();
+        let provider = Arc::new(|| {
+            read_state().map(|(state, can_write)| {
+                rvpn_core::presentation::state_json(&state, can_write, false)
+            })
+        });
+        match rvpn_core::api::ApiHandle::spawn(&config, provider) {
+            Ok(handle) => {
+                self.status = format!("只读 API 已监听 {}", handle.address);
+                self.api_handle = Some(handle);
+            }
+            Err(error) => {
+                self.status = format!("只读 API 启动失败：{error}");
+            }
+        }
     }
 
     fn submit(&self, job: Job) {

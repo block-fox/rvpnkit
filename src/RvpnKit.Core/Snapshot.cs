@@ -11,6 +11,19 @@ public sealed record NetworkInfo(string Name, byte[] Guid, string? Token,
 {
     /// <summary>GUID 的十六进制表示（无连字符），便于命令行/HTTP 传参。</summary>
     public string GuidHex => Convert.ToHexString(Guid).ToLowerInvariant();
+
+    public bool IsPublicNetwork => IsPublicName(Name);
+
+    public static bool IsPublicName(string name)
+    {
+        string trimmed = name.Trim();
+        int open = trimmed.LastIndexOf('[');
+        if (open <= 0 || !trimmed.EndsWith(']') || open + 2 >= trimmed.Length)
+            return false;
+        string marker = trimmed[(open + 1)..^1];
+        return marker.Any(char.IsDigit)
+            && marker.Any(char.IsLetter);
+    }
 }
 
 /// <summary>网络成员。</summary>

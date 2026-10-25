@@ -6,6 +6,7 @@
 - [原生 GUI](GUI.md)
 - [Rust 构建、模块与验证](RUST_CLIENT.md)
 - [.NET agent API](API.md)：Rust WebUI 可通过它远程连接，令牌使用 `RVPNKIT_TOKEN`
+- [内置只读 API 与防火墙](API.md#内置只读-api)：GUI / WebUI 的状态读取接口和 Windows 阻断规则
 - [0.4.0 更新记录](CHANGELOG.md)
 
 ## 协议与研究

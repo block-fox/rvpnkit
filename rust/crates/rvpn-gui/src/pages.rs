@@ -59,7 +59,7 @@ impl App {
                         if !fuzzy_match(&format!("{} {}", net.name, net.guid_hex()), &q)
                             || (self.favorites_only
                                 && !self.preferences.favorites.contains(&net.guid_hex()))
-                            || (self.private_only && net.network_type != Some(0))
+                            || (self.private_only && net.is_public_name())
                         {
                             continue;
                         }
@@ -91,10 +91,10 @@ impl App {
                                     format!(
                                         "{}  [{}]",
                                         net.name,
-                                        if net.network_type == Some(0) {
-                                            "私有"
+                                        if net.is_public_name() {
+                                            "公共"
                                         } else {
-                                            "公共 / 未知"
+                                            "私有"
                                         }
                                     )
                                 ),

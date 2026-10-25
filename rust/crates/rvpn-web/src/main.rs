@@ -18,6 +18,8 @@ const DEFAULT_ADDR: &str = "127.0.0.1:8788";
 static PIPE_GATE: Mutex<()> = Mutex::new(());
 static STATE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
 static PUBLIC_CACHE: Mutex<Option<(std::time::Instant, Vec<String>)>> = Mutex::new(None);
+static READ_API: Mutex<Option<rvpn_core::api::ApiHandle>> = Mutex::new(None);
+static READ_API_CONFIG: Mutex<Option<rvpn_core::api::ApiConfig>> = Mutex::new(None);
 static BACKEND: OnceLock<Backend> = OnceLock::new();
 
 fn backend() -> &'static Backend {
@@ -129,6 +131,10 @@ fn main() {
         eprintln!("界面仍会启动，服务恢复后点击刷新即可重试。");
     }
     let _ = BACKEND.set(chosen);
+    {
+        let mut config = READ_API_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+        *config = Some(rvpn_core::api::ApiConfig::default());
+    }
     let backend_label = backend().label();
 
     let listener = match TcpListener::bind(&addr) {
@@ -295,6 +301,8 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
                 false,
                 true,
             )),
+            ("GET", "/api/read-api") => api_read_api_get(),
+            ("POST", "/api/read-api") => api_read_api_set(&req.body),
             ("GET", "/api/public") => {
                 let search = req
                     .query
@@ -325,7 +333,9 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
 
     // HTTP 后端：除首页外整条路径原样转发给远程 agent。
     // agent 的响应本来就是同一套 {"ok":..,"data":..} 信封，直接透传即可。
-    if matches!(backend(), Backend::Http { .. }) {
+    if matches!(backend(), Backend::Http { .. })
+        && !matches!(req.path.as_str(), "/api/read-api" | "/api/firewall")
+    {
         if req.path == "/" {
             return (200, "text/html; charset=utf-8", UI.as_bytes().to_vec());
         }
@@ -351,31 +361,7 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
                 };
                 if req.path == "/api/state" {
                     if let Some(data) = value.get_mut("data") {
-                        data["demo"] = serde_json::json!(false);
-                        if let Some(me) = data.get_mut("self").and_then(|v| v.as_object_mut()) {
-                            if let Some(id) = me.get("nodeId").and_then(|id| id.as_u64()) {
-                                me.insert("nodeId".into(), serde_json::json!(id.to_string()));
-                            }
-                        }
-                        if let Some(nets) = data.get_mut("networks").and_then(|n| n.as_array_mut())
-                        {
-                            for net in nets {
-                                if let Some(n) = net.as_object_mut() {
-                                    n.remove("token");
-                                }
-                                if let Some(members) =
-                                    net.get_mut("members").and_then(|m| m.as_array_mut())
-                                {
-                                    for member in members {
-                                        if let Some(id) =
-                                            member.get("nodeId").and_then(|id| id.as_u64())
-                                        {
-                                            member["nodeId"] = serde_json::json!(id.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        sanitize_api_state(data);
                     }
                 }
                 (
@@ -391,6 +377,10 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => (200, "text/html; charset=utf-8", UI.as_bytes().to_vec()),
         ("GET", "/api/state") => api_state(&req.query),
+        ("GET", "/api/read-api") => api_read_api_get(),
+        ("POST", "/api/read-api") => api_read_api_set(&req.body),
+        ("GET", "/api/firewall") => api_firewall_get(),
+        ("POST", "/api/firewall") => api_firewall_post(&req.body),
         ("GET", "/api/public") => api_public(&req.query),
         ("POST", "/api/probe") => api_probe(&req.body),
         ("POST", "/api/desktop") => api_desktop(&req.body),
@@ -459,6 +449,165 @@ fn api_state(query: &str) -> (u16, &'static str, Vec<u8>) {
             json_ok(value)
         }
         Err(e) => json_err(502, format!("读取快照失败：{e}")),
+    }
+}
+
+fn read_api_snapshot() -> Result<serde_json::Value, String> {
+    match backend() {
+        Backend::Demo => Ok(rvpn_core::presentation::state_json(
+            &rvpn_core::presentation::demo_state(),
+            false,
+            true,
+        )),
+        Backend::Pipe => read_snapshot().map(|(state, can_write)| {
+            rvpn_core::presentation::state_json(&state, can_write, false)
+        }),
+        Backend::Http { .. } => {
+            let (_, body) = backend::http_get(backend(), "/api/state")?;
+            let value: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| e.to_string())?;
+            let mut data = value
+                .get("data")
+                .cloned()
+                .ok_or_else(|| String::from("agent 响应缺少 data"))?;
+            sanitize_api_state(&mut data);
+            Ok(data)
+        }
+    }
+}
+
+fn sanitize_api_state(data: &mut serde_json::Value) {
+    data["demo"] = serde_json::json!(false);
+    if let Some(me) = data.get_mut("self").and_then(|v| v.as_object_mut()) {
+        if let Some(id) = me.get("nodeId").and_then(|id| id.as_u64()) {
+            me.insert("nodeId".into(), serde_json::json!(id.to_string()));
+        }
+    }
+    if let Some(networks) = data.get_mut("networks").and_then(|v| v.as_array_mut()) {
+        for network in networks {
+            if let Some(object) = network.as_object_mut() {
+                object.remove("token");
+            }
+            if let Some(members) = network.get_mut("members").and_then(|v| v.as_array_mut()) {
+                for member in members {
+                    if let Some(id) = member.get("nodeId").and_then(|id| id.as_u64()) {
+                        member["nodeId"] = serde_json::json!(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn restart_read_api(config: rvpn_core::api::ApiConfig) -> Result<Option<String>, String> {
+    let mut slot = READ_API.lock().unwrap_or_else(|e| e.into_inner());
+    let old = slot.take();
+    if !config.enabled {
+        return Ok(None);
+    }
+    let provider = std::sync::Arc::new(read_api_snapshot);
+    let handle = match rvpn_core::api::ApiHandle::spawn(&config, provider) {
+        Ok(handle) => handle,
+        Err(error) => {
+            *slot = old;
+            return Err(error);
+        }
+    };
+    let address = handle.address.clone();
+    *slot = Some(handle);
+    drop(slot);
+    drop(old);
+    Ok(Some(address))
+}
+
+fn api_read_api_get() -> (u16, &'static str, Vec<u8>) {
+    let config = READ_API_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    let active = READ_API
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|handle| handle.address.clone());
+    json_ok(serde_json::json!({
+        "enabled": config.enabled,
+        "bindIp": config.bind_ip,
+        "port": config.port,
+        "hasToken": !config.token.is_empty(),
+        "active": active,
+    }))
+}
+
+fn api_read_api_set(body: &str) -> (u16, &'static str, Vec<u8>) {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return json_err(400, "请求体必须为 JSON"),
+    };
+    let mut config = rvpn_core::api::ApiConfig::default();
+    config.enabled = value
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    config.bind_ip = value
+        .get("bindIp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1")
+        .trim()
+        .to_string();
+    config.port = value
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(8790);
+    config.token = value
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Err(error) = config.socket_address() {
+        return json_err(400, error);
+    }
+    match restart_read_api(config.clone()) {
+        Ok(active) => {
+            *READ_API_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+            json_ok(serde_json::json!({
+                "enabled": config.enabled,
+                "bindIp": config.bind_ip,
+                "port": config.port,
+                "hasToken": !config.token.is_empty(),
+                "active": active,
+            }))
+        }
+        Err(error) => json_err(409, error),
+    }
+}
+
+fn api_firewall_get() -> (u16, &'static str, Vec<u8>) {
+    match rvpn_core::firewall::list_rules() {
+        Ok(rules) => json_ok(serde_json::json!({
+            "rules": rules.into_iter().map(|rule| serde_json::json!({"ip":rule.ip,"name":rule.name})).collect::<Vec<_>>()
+        })),
+        Err(error) => json_err(409, error),
+    }
+}
+
+fn api_firewall_post(body: &str) -> (u16, &'static str, Vec<u8>) {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return json_err(400, "请求体必须为 JSON"),
+    };
+    let action = value.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let ip = value.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+    let result = match action {
+        "block" => rvpn_core::firewall::block_ip(ip),
+        "unblock" => rvpn_core::firewall::unblock_ip(ip),
+        _ => return json_err(400, "action 支持 block / unblock"),
+    };
+    match result {
+        Ok(message) => json_ok(serde_json::json!({"message": message})),
+        Err(error) => json_err(409, error),
     }
 }
 

@@ -30,6 +30,38 @@ impl NetworkInfo {
     pub fn can_manage(&self) -> bool {
         self.role == Some(2)
     }
+    pub fn is_public_name(&self) -> bool {
+        is_public_network_name(&self.name)
+    }
+}
+
+/// Public Radmin networks use a suffix such as "[English 1]" or "[简体中文 02]".
+/// Private networks do not carry that language/region + numeric marker.
+pub fn is_public_network_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    let Some(open) = trimmed.rfind('[') else {
+        return false;
+    };
+    if !trimmed.ends_with(']') || open == 0 || open + 2 >= trimmed.len() {
+        return false;
+    }
+    let marker = &trimmed[open + 1..trimmed.len() - 1];
+    marker.chars().any(|c| c.is_ascii_digit()) && marker.chars().any(char::is_alphabetic)
+}
+
+#[cfg(test)]
+mod network_name_tests {
+    use super::is_public_network_name;
+
+    #[test]
+    fn recognizes_public_suffix_and_defaults_other_names_to_private() {
+        assert!(is_public_network_name("Minecraft [English 1]"));
+        assert!(is_public_network_name("游戏大厅 [简体中文 02]"));
+        assert!(!is_public_network_name("我的家庭网络"));
+        assert!(!is_public_network_name("测试网络 [朋友]"));
+        assert!(!is_public_network_name("测试网络 [123]"));
+        assert!(!is_public_network_name("测试网络 [_1]"));
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

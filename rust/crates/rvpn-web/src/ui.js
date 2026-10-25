@@ -55,6 +55,7 @@ const state = {
   publicResults: [],
   publicLoaded: false,
   measuredLatencies: storage.get('latencies', {}),
+  apiConfig: null,
   probing: false,
   selectedNetwork: '',
   selection: new Set(),
@@ -181,6 +182,55 @@ async function api(path, body) {
     clearTimeout(timeout);
   }
 }
+async function loadApiSettings() {
+  if (!$('#api-enabled')) return;
+  try {
+    const config = await api('/api/read-api');
+    state.apiConfig = config;
+    $('#api-enabled').checked = config.enabled === true;
+    $('#api-bind-ip').value = config.bindIp || '127.0.0.1';
+    $('#api-port').value = config.port || 8790;
+    $('#api-token').value = '';
+    $('#api-status').textContent = config.active ? '运行中：' + config.active : config.enabled ? '已启用但未运行' : '未启用';
+  } catch (error) {
+    $('#api-status').textContent = error.message;
+  }
+}
+async function applyApiSettings() {
+  const payload = {
+    enabled: $('#api-enabled').checked,
+    bindIp: $('#api-bind-ip').value.trim(),
+    port: Number($('#api-port').value),
+    token: $('#api-token').value
+  };
+  try {
+    const config = await api('/api/read-api', payload);
+    state.apiConfig = config;
+    $('#api-token').value = '';
+    $('#api-status').textContent = config.active ? '运行中：' + config.active : '未启用';
+    toast(config.active ? '只读 API 已启动：' + config.active : '只读 API 已关闭');
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+async function loadFirewallRules() {
+  if (!$('#firewall-rules')) return;
+  try {
+    const data = await api('/api/firewall');
+    $('#firewall-rules').innerHTML = (data.rules || []).map(rule => '<span class="firewall-rule mono">' + esc(rule.ip) + '<button class="icon-btn" data-firewall-ip="' + esc(rule.ip) + '" title="解除阻断" aria-label="解除阻断 ' + esc(rule.ip) + '">×</button></span>').join('') || '<span class="muted">暂无 RvpnKit 阻断规则</span>';
+  } catch (error) {
+    $('#firewall-rules').textContent = error.message;
+  }
+}
+async function firewallAction(action, ip) {
+  try {
+    await api('/api/firewall', {action, ip});
+    toast(action === 'block' ? '已阻断 ' + ip : '已解除阻断 ' + ip);
+    await loadFirewallRules();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
 function nets() {
   return state.data?.networks || [];
 }
@@ -188,12 +238,10 @@ function currentNetwork() {
   return nets().find(n => n.guid === state.selectedNetwork);
 }
 function networkKind(network) {
-  if (network.community || network.networkType === 1) return 'public';
-  if (network.networkType === 0) return 'private';
-  return 'unknown';
+  return network.publicNetwork === true ? 'public' : 'private';
 }
 function networkKindText(network) {
-  return networkKind(network) === 'public' ? '公共网络' : networkKind(network) === 'private' ? '私有网络' : '网络类型未知';
+  return networkKind(network) === 'public' ? '公共网络' : '私有网络';
 }
 function latencyValue(member) {
   return member.virtualIp ? state.measuredLatencies[member.virtualIp] ?? null : null;
@@ -686,6 +734,14 @@ $('#chat-official').onclick = async () => {
     toast(error.message, true);
   }
 };
+$('#api-apply').onclick = applyApiSettings;
+$('#firewall-form').onsubmit = e => {
+  e.preventDefault();
+  firewallAction('block', $('#firewall-ip').value.trim());
+};
+$$('[data-firewall-action]').forEach(el => {
+  el.onclick = () => firewallAction(el.dataset.firewallAction, $('#firewall-ip').value.trim());
+});
 $('#prev-page').onclick = () => {
   state.memberPage--;
   renderMembers();
@@ -799,6 +855,9 @@ document.addEventListener('click', e => {
       .then(() => toast('已启动 Radmin 工具'))
       .catch(error => toast(error.message, true));
   }
+  if (b.dataset.firewallIp) {
+    firewallAction('unblock', b.dataset.firewallIp);
+  }
   if (b.dataset.memberDetail) {
     const m = currentNetwork()?.members.find(m => m.nodeId === b.dataset.memberDetail);
     if (m) openDialog('成员详情', `<dl class="details"><dt>别名</dt><dd>${esc(m.alias || '未提供')}</dd><dt>节点 ID</dt><dd class="mono">${esc(m.nodeId)}</dd><dt>虚拟 IPv4</dt><dd class="mono">${esc(m.virtualIp || '未提供')}</dd><dt>虚拟 IPv6</dt><dd class="mono">${esc(m.virtualIpv6 || '未提供')}</dd><dt>云端节点 IP</dt><dd class="mono">${esc(m.cloudNodeIp || m.publicIp || '未提供')}</dd><dt>状态</dt><dd>${esc(memberStatus(m))}</dd><dt>角色</dt><dd>${esc(memberRole(m))}</dd><dt>通道</dt><dd>${esc(memberChannel(m))}</dd><dt>延迟</dt><dd>${esc(latencyText(m))}</dd><dt>产品版本</dt><dd>${esc(m.productVersion || '未提供')}</dd><dt>所在网络</dt><dd>${esc(currentNetwork().name)}</dd></dl>`, '复制节点 ID', () => copy(m.nodeId));
@@ -828,5 +887,7 @@ document.addEventListener('keydown', e => {
 window.addEventListener('hashchange', renderPage);
 renderPage();
 renderActivity();
+loadApiSettings();
+loadFirewallRules();
 updatePermissions();
 refresh();

@@ -1,3 +1,4 @@
+use rvpn_core::api::ApiConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ pub struct Preferences {
     pub refresh_seconds: u64,
     pub favorites: HashSet<String>,
     pub compact: bool,
+    pub api: ApiConfig,
 }
 
 impl Default for Preferences {
@@ -18,6 +20,7 @@ impl Default for Preferences {
             refresh_seconds: 10,
             favorites: HashSet::new(),
             compact: false,
+            api: ApiConfig::default(),
         }
     }
 }

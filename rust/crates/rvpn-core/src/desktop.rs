@@ -271,17 +271,8 @@ pub fn execute(action: DesktopAction, address: Option<&str>) -> Result<String, S
             launch("explorer.exe", &[format!(r"\\{ip}\")])
         }
         DesktopAction::IpBackup | DesktopAction::IpReset | DesktopAction::IpChangeMac => {
-            let script = match action {
-                DesktopAction::IpBackup => "backup-ip.ps1",
-                DesktopAction::IpReset => "reset-ip.ps1",
-                DesktopAction::IpChangeMac => "change-mac.ps1",
-                _ => unreachable!(),
-            };
-            let path = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.join("RadminVPN-IP-Tools").join("scripts").join(script)))
-                .filter(|p| p.is_file())
-                .ok_or_else(|| format!("未找到可选 IP 工具：请将 AXFJ 工具的 scripts 放到程序目录\\RadminVPN-IP-Tools\\scripts\\{script}"))?;
+            let (script, source) = embedded_ip_script(action);
+            let path = materialize_script(script, source)?;
             launch(
                 "powershell.exe",
                 &[
@@ -302,6 +293,59 @@ pub fn execute(action: DesktopAction, address: Option<&str>) -> Result<String, S
             )
         }
     }
+}
+
+fn embedded_ip_script(action: DesktopAction) -> (&'static str, &'static str) {
+    match action {
+        DesktopAction::IpBackup => (
+            "backup-ip.ps1",
+            r#"$ErrorActionPreference = 'Stop'
+$adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'Radmin|VPN' }
+$rows = foreach ($adapter in $adapters) {
+  [pscustomobject]@{
+    Name = $adapter.Name
+    MacAddress = $adapter.MacAddress
+    IPv4 = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object IPAddress)
+    IPv6 = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue | ForEach-Object IPAddress)
+  }
+}
+$target = Join-Path ([Environment]::GetFolderPath('Desktop')) 'RvpnKit-radmin-ip-backup.json'
+$rows | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $target
+Write-Host "已备份到 $target"
+"#,
+        ),
+        DesktopAction::IpReset => (
+            "reset-ip.ps1",
+            r#"$ErrorActionPreference = 'Stop'
+$adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'Radmin|VPN' }
+foreach ($adapter in $adapters) {
+  Restart-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
+}
+Write-Host "已重启 Radmin VPN 网络适配器；虚拟 IP 将由官方服务重新分配。"
+"#,
+        ),
+        DesktopAction::IpChangeMac => (
+            "change-mac.ps1",
+            r#"$ErrorActionPreference = 'Stop'
+$adapter = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -match 'Radmin|VPN' } | Select-Object -First 1
+if ($null -eq $adapter) { throw '未找到 Radmin VPN 网络适配器' }
+$bytes = [byte[]](1..6 | ForEach-Object { Get-Random -Minimum 0 -Maximum 255 })
+$bytes[0] = $bytes[0] -bor 2
+$mac = ($bytes | ForEach-Object { $_.ToString('X2') }) -join ''
+Set-NetAdapter -Name $adapter.Name -MacAddress $mac -Confirm:$false
+Write-Host "已将 $($adapter.Name) 的 MAC 切换为 $mac"
+"#,
+        ),
+        _ => unreachable!(),
+    }
+}
+
+fn materialize_script(name: &str, source: &str) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir().join("RvpnKit").join("scripts");
+    std::fs::create_dir_all(&directory).map_err(|e| format!("无法准备内置工具：{e}"))?;
+    let path = directory.join(name);
+    std::fs::write(&path, source.as_bytes()).map_err(|e| format!("无法写入内置工具：{e}"))?;
+    Ok(path)
 }
 fn decode_output(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {

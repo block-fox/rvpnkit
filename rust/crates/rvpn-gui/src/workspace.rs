@@ -329,6 +329,7 @@ impl App {
 
     pub(super) fn workspace_settings(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
+        let mut apply_api = false;
         card(ui, self.palette, |ui| {
             ui.horizontal(|ui| {
                 ui.label("自动刷新");
@@ -386,9 +387,65 @@ impl App {
                         .color(self.palette.muted),
                 );
             });
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(RichText::new("开放只读 API").size(14.0).strong());
+            ui.label(
+                RichText::new("供脚本和开发工具读取状态；接口不提供加入、删除、改名等写操作。")
+                    .size(11.0)
+                    .color(self.palette.muted),
+            );
+            ui.checkbox(&mut self.preferences.api.enabled, "启用本机只读 API");
+            ui.horizontal(|ui| {
+                ui.label("绑定 IP");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.preferences.api.bind_ip)
+                        .desired_width(170.0)
+                        .hint_text("127.0.0.1"),
+                );
+                ui.label("端口");
+                ui.add(
+                    egui::DragValue::new(&mut self.preferences.api.port)
+                        .range(1..=65535)
+                        .speed(1),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("令牌（可选）");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.preferences.api.token)
+                        .password(true)
+                        .desired_width(220.0),
+                );
+                if ui.button("应用 API 设置").clicked() {
+                    apply_api = true;
+                }
+            });
+            if let Some(handle) = &self.api_handle {
+                ui.label(
+                    RichText::new(format!("运行中：{}", handle.address))
+                        .size(10.5)
+                        .color(self.palette.ok),
+                );
+            } else {
+                ui.label(
+                    RichText::new(if self.preferences.api.enabled {
+                        "尚未启动，点击“应用 API 设置”"
+                    } else {
+                        "未启用"
+                    })
+                    .size(10.5)
+                    .color(self.palette.muted),
+                );
+            }
         });
         if changed {
             self.save_preferences();
+        }
+        if apply_api {
+            self.save_preferences();
+            self.restart_read_api();
         }
         ui.add_space(12.0);
     }

@@ -96,3 +96,29 @@ GET /api/state            13 个网络 / 2982 个成员 / 1445 个节点，别�
                           本机 快乐狐狸 #204206449 198.244.203.247
 GET /api/public           需要可写连接；只读时返回 502 + 明确原因
 ```
+
+## 内置只读 API
+
+Rust WebUI 和原生 GUI 都能在设置页启动同一套只读 API。它与 WebUI 页面端口分离，默认绑定 `127.0.0.1:8790`，可指定 IPv4 / IPv6 地址、端口和令牌。
+
+当配置了令牌时，每个请求都要带 `X-Api-Token` 请求头。令牌也可以放在 `?token=` 查询参数中，便于简单脚本探活；在共享网络中建议只使用请求头。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | API 服务状态 |
+| GET | `/api/state` | 当前本机、网络、成员和连接状态 |
+| GET | `/api/schema` | 接口版本与端点列表 |
+
+响应统一使用 `{"ok":true,"data":...}` 或 `{"ok":false,"error":"..."}`。只读 API 不返回可逆密码令牌，节点 ID 使用字符串，避免 JavaScript 大整数精度丢失。
+
+```powershell
+$headers = @{ 'X-Api-Token' = 'YOUR_TOKEN' }
+Invoke-RestMethod http://127.0.0.1:8790/health -Headers $headers
+Invoke-RestMethod http://127.0.0.1:8790/api/state -Headers $headers
+```
+
+绑定到局域网地址后，API 会暴露成员地址和连接状态。请配合令牌、Windows 防火墙和可信网络使用，不要直接映射到公网。
+
+## Windows 防火墙
+
+设置页的“Windows 防火墙阻断”会创建带有 `RvpnKit Block ` 前缀的入站阻断规则。输入 IPv4 或 IPv6 地址即可阻断或解除阻断；列表只显示 RvpnKit 自己创建的规则，不会修改其他防火墙规则。该操作需要管理员权限。

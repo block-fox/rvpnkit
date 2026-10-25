@@ -669,6 +669,43 @@
                   </button>
                 </div>
               </article>
+              <article class="card settings-card">
+                <h3>开放只读 API</h3>
+                <p class="muted">
+                  为脚本和开发工具提供状态读取接口。只读 API 不提供加入、删除、改名或电源控制。
+                </p>
+                <div class="setting">
+                  <div>
+                    <b>启用 API 服务</b>
+                    <p>绑定到本机或局域网地址。</p>
+                  </div>
+                  <input type="checkbox" id="api-enabled" aria-label="启用只读 API">
+                </div>
+                <div class="setting api-setting-row">
+                  <label for="api-bind-ip">绑定 IP</label>
+                  <input id="api-bind-ip" value="127.0.0.1" inputmode="numeric" aria-label="API 绑定 IP">
+                  <label for="api-port">端口</label>
+                  <input id="api-port" type="number" min="1" max="65535" value="8790" aria-label="API 端口">
+                </div>
+                <div class="setting api-setting-row">
+                  <label for="api-token">令牌</label>
+                  <input id="api-token" type="password" placeholder="局域网开放时建议设置" aria-label="API 令牌">
+                  <button class="btn" id="api-apply">应用 API 设置</button>
+                </div>
+                <p class="muted" id="api-status">未启用</p>
+              </article>
+              <article class="card settings-card">
+                <h3>Windows 防火墙阻断</h3>
+                <p class="muted">
+                  输入 IP，或从成员详情复制云端节点 IP 后阻断入站连接。
+                </p>
+                <form id="firewall-form" class="filterbar">
+                  <input id="firewall-ip" placeholder="例如 203.0.113.20" inputmode="numeric" aria-label="要阻断的 IP">
+                  <button class="btn danger" type="submit">阻断 IP</button>
+                  <button class="btn" type="button" data-firewall-action="unblock">解除阻断</button>
+                </form>
+                <div id="firewall-rules" class="firewall-rules"></div>
+              </article>
             </div>
             <div>
               <article class="card settings-card">

@@ -123,6 +123,7 @@ app.MapGet("/api/state", async (RvpnService svc, bool? refresh, CancellationToke
                 guid = n.GuidHex,
                 token = n.Token,
                 networkType = n.NetworkType,
+                publicNetwork = n.IsPublicNetwork,
                 memberCount = n.Members.Count,
                 members = n.Members.Select(m => new
                 {

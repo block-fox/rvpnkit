@@ -246,6 +246,44 @@ impl App {
                     for(action,label)in[(DesktopAction::IpBackup,"备份 Radmin IP"),(DesktopAction::IpReset,"重置虚拟 IP"),(DesktopAction::IpChangeMac,"切换虚拟 MAC")]{if ui.add_enabled(!self.demo,egui::Button::new(label)).clicked(){self.desktop_action(action,None,label);}}
                 });
             });ui.add_space(14.0);
+            card(ui, self.palette, |ui| {
+                ui.label(RichText::new("Windows 防火墙阻断").strong());
+                ui.label(
+                    RichText::new("输入成员的云端节点 IP，或从成员详情复制 IP 后阻断入站连接。")
+                        .size(11.0)
+                        .color(self.palette.muted),
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.firewall_ip)
+                            .desired_width(210.0)
+                            .hint_text("例如 203.0.113.20"),
+                    );
+                    if ui
+                        .add_enabled(!self.demo, egui::Button::new("阻断 IP"))
+                        .clicked()
+                    {
+                        self.status = match rvpn_core::firewall::block_ip(&self.firewall_ip) {
+                            Ok(message) => message,
+                            Err(error) => error,
+                        };
+                    }
+                    if ui
+                        .add_enabled(!self.demo, egui::Button::new("解除阻断"))
+                        .clicked()
+                    {
+                        self.status = match rvpn_core::firewall::unblock_ip(&self.firewall_ip) {
+                            Ok(message) => message,
+                            Err(error) => error,
+                        };
+                    }
+                });
+                ui.label(
+                    RichText::new("规则只会阻断入站连接，删除规则不会影响其他 Windows 防火墙规则。")
+                        .size(10.5)
+                        .color(self.palette.muted),
+                );
+            });ui.add_space(14.0);
             card(ui,self.palette,|ui|{
                 ui.label(RichText::new("Radmin 远程工具").strong());
                 ui.label(if desktop::viewer_path().is_some(){"已检测到 Radmin Viewer"}else{"未安装 Radmin Viewer"});
@@ -376,9 +414,12 @@ impl App {
                                 ),
                                 (
                                     "类型",
-                                    net.network_type
-                                        .map(|v| format!("{v}"))
-                                        .unwrap_or_else(|| "未知".into()),
+                                    if net.is_public_name() {
+                                        "公共网络"
+                                    } else {
+                                        "私有网络"
+                                    }
+                                    .into(),
                                 ),
                                 (
                                     "网络状态",
