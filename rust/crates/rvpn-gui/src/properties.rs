@@ -67,7 +67,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [92.0, 18.0],
-                        egui::Label::new(RichText::new("公网 IP").size(12.5).color(p.muted)),
+                        egui::Label::new(RichText::new("云端节点 IP").size(12.5).color(p.muted)),
                     );
                     ui.label(
                         RichText::new(m.public_ip.clone().unwrap_or_else(|| "-".into()))
@@ -114,7 +114,7 @@ impl App {
                     ),
                     (
                         "延迟",
-                        m.latency_ms
+                        self.measured_latency(&m)
                             .filter(|_| m.online() == Some(true))
                             .map(|v| format!("{v} ms"))
                             .unwrap_or_else(|| "—".into()),

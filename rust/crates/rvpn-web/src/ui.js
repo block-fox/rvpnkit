@@ -26,7 +26,8 @@ const icons = {
   copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
   search: '<circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/>',
   star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/>',
-  check: '<path d="m5 12 4 4L19 6"/>'
+  check: '<path d="m5 12 4 4L19 6"/>',
+  message: '<path d="M4 5h16v11H8l-4 4Z"/><path d="M8 9h8m-8 3h5"/>'
 };
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.network}</svg>`;
 $$('[data-icon]').forEach(el => el.replaceWith(document.createRange().createContextualFragment(icon(el.dataset.icon))));
@@ -52,6 +53,9 @@ const state = {
   sending: false,
   publicLoading: false,
   publicResults: [],
+  publicLoaded: false,
+  measuredLatencies: storage.get('latencies', {}),
+  probing: false,
   selectedNetwork: '',
   selection: new Set(),
   memberPage: 0,
@@ -62,11 +66,28 @@ const state = {
   timer: null,
   dialogAction: null
 };
+function normalized(value) {
+  return String(value ?? '').toLocaleLowerCase('zh-CN').replace(/[\s\-_./:[\]{}()]+/g, '');
+}
+function fuzzyScore(value, query) {
+  const haystack = normalized(value), needle = normalized(query);
+  if (!needle) return 0;
+  if (haystack.includes(needle)) return 1000 - (haystack.length - needle.length);
+  let cursor = 0, score = 0;
+  for (const char of needle) {
+    const found = haystack.indexOf(char, cursor);
+    if (found < 0) return -1;
+    score += Math.max(1, 80 - (found - cursor));
+    cursor = found + 1;
+  }
+  return score;
+}
 const pages = {
   overview: ['总览', '一切就绪，准备联机。', '网络、伙伴和下一场冒险，都在这里。', 'YOUR NETWORK, AT A GLANCE'],
   networks: ['我的网络', '每一个网络，都是一个小世界。', '收藏常去的地方，或为下一次冒险创建一个新空间。', 'YOUR LITTLE WORLDS'],
   members: ['网络成员', '一起玩的，都在这里。', '找到伙伴，查看设备信息，管理网络成员。', 'BETTER TOGETHER'],
   public: ['发现网络', '去遇见，下一个联机伙伴。', '从你喜欢的游戏开始，发现更多共同的热爱。', 'FIND YOUR NEXT ADVENTURE'],
+  chat: ['聊天与远程', '直接联系网络里的伙伴。', '优先调用 Radmin Viewer；没有安装时再打开官方客户端。', 'TALK TO YOUR TEAM'],
   activity: ['活动记录', '每一次变化，都有迹可循。', '只记录当前会话中实际观察到的变化和操作。', 'A LITTLE HISTORY'],
   settings: ['设置', '让这里，更像你的工作空间。', '调整外观、设备别名和刷新习惯。', 'MAKE YOURSELF AT HOME']
 };
@@ -90,7 +111,9 @@ function renderPage() {
   });
   renderNetworks();
   renderMembers();
+  renderChat();
   renderActivity();
+  if (state.page === 'public' && !state.publicLoaded && !state.publicLoading) loadPublic('');
 }
 function theme(value) {
   const t = value === 'dark' ? 'dark' : 'light';
@@ -164,6 +187,43 @@ function nets() {
 function currentNetwork() {
   return nets().find(n => n.guid === state.selectedNetwork);
 }
+function networkKind(network) {
+  if (network.community || network.networkType === 1) return 'public';
+  if (network.networkType === 0) return 'private';
+  return 'unknown';
+}
+function networkKindText(network) {
+  return networkKind(network) === 'public' ? '公共网络' : networkKind(network) === 'private' ? '私有网络' : '网络类型未知';
+}
+function latencyValue(member) {
+  return member.virtualIp ? state.measuredLatencies[member.virtualIp] ?? null : null;
+}
+function latencyText(member) {
+  const value = latencyValue(member);
+  if (value == null) return memberStatus(member) === '在线' ? '测量中…' : '—';
+  const bars = value <= 30 ? '▮▮▮▮' : value <= 80 ? '▮▮▮▫' : value <= 160 ? '▮▮▫▫' : '▮▫▫▫';
+  return `${bars} ${value} ms`;
+}
+async function probeMembers(members) {
+  if (state.probing) return;
+  const ips = [...new Set(members.map(m => m.virtualIp).filter(Boolean))]
+    .filter(ip => state.measuredLatencies[ip] === undefined)
+    .slice(0, 32);
+  if (!ips.length) return;
+  state.probing = true;
+  try {
+    const data = await api('/api/probe', {ips});
+    (data.results || []).forEach(item => {
+      state.measuredLatencies[item.ip] = item.latencyMs;
+    });
+    storage.set('latencies', state.measuredLatencies);
+    renderMembers();
+  } catch {
+    // The remote agent may not expose local ICMP probing; keep the snapshot usable.
+  } finally {
+    state.probing = false;
+  }
+}
 function writable() {
   return state.connected && state.data?.canWrite && !state.data?.demo && !state.sending;
 }
@@ -178,6 +238,7 @@ function updatePermissions() {
   $('#export-top').disabled = !state.data;
   $('#export-settings').disabled = !state.data;
   $('#copy-ip').disabled = !state.data?.self?.virtualIp;
+  if ($('#chat-official')) $('#chat-official').disabled = state.data?.demo === true;
 }
 async function refresh(manual = false) {
   if (state.loading || state.sending) return;
@@ -289,6 +350,7 @@ function renderData() {
   $('#overview-net-count').textContent = nets().length;
   renderNetworks();
   renderMembers();
+  renderChat();
   renderActivity();
   updatePermissions();
 }
@@ -302,27 +364,50 @@ function networkCard(n, full = false) {
   return `<article class="card network-card"><div class="network-card-top"><div class="network-avatar">${icon('network')}</div><span class="role-badge ${n.role === 2 ? 'admin' : ''}">${role}</span><button class="icon-btn favorite-btn ${favorite ? 'active' : ''}" data-favorite="${guid}" aria-label="${favorite ? '取消收藏' : '收藏'} ${esc(n.name)}" aria-pressed="${favorite}">${favorite ? '★' : '☆'}</button></div><h3 title="${esc(n.name)}">${esc(n.name)}</h3><p class="guid mono" title="${guid}">${esc(n.guid.slice(0, 8))} · ${esc(n.guid.slice(-8))}</p><div class="network-card-bottom"><div class="member-stack">${n.members.slice(0, 3).map(m => `<span class="mini-avatar" title="${esc(m.alias || m.nodeId)}">${esc(Array.from(m.alias || '#')[0])}</span>`).join('')}<small>${n.members.length} 位成员</small></div><button class="text-btn" data-members="${guid}">查看成员 <span>→</span></button></div>${full ? `<div class="network-actions"><button class="text-btn" data-copy-guid="${guid}">复制 GUID</button><button class="text-btn" data-net-action="enabled" data-guid="${guid}">启用 / 禁用</button><button class="text-btn danger" data-net-action="leave" data-guid="${guid}">离开</button>${n.role === 2 ? `<button class="text-btn danger" data-net-action="delete" data-guid="${guid}">删除</button>` : ''}</div>` : ''}</article>`;
 }
 function renderNetworks() {
-  const sorted = [...nets()].sort((a, b) => Number(state.favorites.has(b.guid)) - Number(state.favorites.has(a.guid)) || a.name.localeCompare(b.name, 'zh-CN'));
+  const selectedKind = $('#network-kind')?.value || 'all';
+  const sorted = [...nets()].filter(n => selectedKind === 'all' || networkKind(n) === selectedKind).sort((a, b) => Number(state.favorites.has(b.guid)) - Number(state.favorites.has(a.guid)) || a.name.localeCompare(b.name, 'zh-CN'));
   $('#overview-networks').innerHTML = sorted.slice(0, 3).map(n => networkCard(n)).join('') || empty('还没有加入网络', '点击右上角「加入网络」，开始你的第一次联机。');
+  $$('#overview-networks .network-card').forEach((card, index) => {
+    const network = sorted[index];
+    const badge = document.createElement('span');
+    badge.className = 'role-badge network-kind ' + networkKind(network);
+    badge.textContent = networkKindText(network);
+    card.querySelector('.network-card-top')?.insertBefore(badge, card.querySelector('.favorite-btn'));
+  });
   const q = $('#network-search').value.trim().toLocaleLowerCase(),
     role = $('#network-role').value;
-  const filtered = sorted.filter(n => `${n.name} ${n.guid}`.toLocaleLowerCase().includes(q) && (!state.favoritesOnly || state.favorites.has(n.guid)) && (role === 'all' || (role === 'admin' ? n.role === 2 : n.role === 1)));
+  const filtered = sorted
+    .map(n => ({n, score: fuzzyScore(`${n.name} ${n.guid} ${networkKindText(n)}`, q)}))
+    .filter(item => item.score >= 0 && (!state.favoritesOnly || state.favorites.has(item.n.guid)) && (role === 'all' || (role === 'admin' ? item.n.role === 2 : item.n.role === 1)))
+    .sort((a, b) => b.score - a.score || a.n.name.localeCompare(b.n.name, 'zh-CN'))
+    .map(item => item.n);
   $('#network-summary').textContent = `共 ${nets().length} 个网络 · 当前显示 ${filtered.length} 个`;
-  $('#all-networks').innerHTML = filtered.map(n => networkCard(n, true)).join('') || empty(q || state.favoritesOnly || role !== 'all' ? '没有匹配的网络' : '还没有加入网络', '试试其他筛选条件，或加入一个新的网络。');
+  $('#all-networks').innerHTML = filtered.map(n => networkCard(n, true)).join('') || empty(q || state.favoritesOnly || role !== 'all' || selectedKind !== 'all' ? '没有匹配的网络' : '还没有加入网络', '试试其他筛选条件，或加入一个新的网络。');
+  $$('#all-networks .network-card').forEach((card, index) => {
+    const network = filtered[index];
+    const badge = document.createElement('span');
+    badge.className = `role-badge network-kind ${networkKind(network)}`;
+    badge.textContent = networkKindText(network);
+    card.querySelector('.network-card-top')?.insertBefore(badge, card.querySelector('.favorite-btn'));
+  });
   updatePermissions();
 }
 function filteredMembers() {
-  const q = $('#member-search').value.trim().toLocaleLowerCase();
-  return [...(currentNetwork()?.members || [])].filter(m => `${m.alias || ''} ${m.nodeId} ${m.publicIp || ''} ${m.virtualIp || ''} ${m.virtualIpv6 || ''} ${m.role === 2 ? '管理员' : m.role === 1 ? '成员' : '未知'} ${m.online === true ? '在线' : m.online === false ? '离线' : '未知'} ${m.latencyMs ?? ''}`.toLocaleLowerCase().includes(q)).sort((a, b) => $('#member-sort').value === 'id' ? BigInt(a.nodeId) < BigInt(b.nodeId) ? -1 : BigInt(a.nodeId) > BigInt(b.nodeId) ? 1 : 0 : (a.alias || a.nodeId).localeCompare(b.alias || b.nodeId, 'zh-CN'));
+  const q = $('#member-search').value.trim();
+  return [...(currentNetwork()?.members || [])]
+    .map(m => ({m, score: fuzzyScore(`${m.alias || ''} ${m.nodeId} ${m.cloudNodeIp || m.publicIp || ''} ${m.virtualIp || ''} ${m.virtualIpv6 || ''} ${m.connectionText || ''} ${m.online === true ? '在线' : m.online === false ? '离线' : '未知'}`, q)}))
+    .filter(item => item.score >= 0)
+    .sort((a, b) => $('#member-sort').value === 'id' ? BigInt(a.m.nodeId) < BigInt(b.m.nodeId) ? -1 : BigInt(a.m.nodeId) > BigInt(b.m.nodeId) ? 1 : 0 : b.score - a.score || (a.m.alias || a.m.nodeId).localeCompare(b.m.alias || b.m.nodeId, 'zh-CN'))
+    .map(item => item.m);
 }
 function memberStatus(m) {
-  return m.online === true ? '在线' : m.online === false ? '离线' : '未知';
+  return m.connectionOk === true || m.online === true ? '在线' : m.connectionOk === false || m.online === false ? '离线' : '未知';
 }
 function memberRole(m) {
   return m.role === 2 ? '管理员' : m.role === 1 ? '成员' : m.role === 3 ? '申请中' : '未知';
 }
 function memberChannel(m) {
-  return m.channelType == null ? '未知通道' : ({0: '直连', 1: '中继'}[m.channelType] || `通道 ${m.channelType}`);
+  return m.connectionText || (m.channelType == null ? '未知通道' : ({0: '直连', 1: '中继'}[m.channelType] || `通道 ${m.channelType}`));
 }
 function renderMembers() {
   const select = $('#member-network'),
@@ -334,7 +419,24 @@ function renderMembers() {
   state.memberPage = Math.max(0, Math.min(state.memberPage, max - 1));
   const visible = list.slice(state.memberPage * 50, (state.memberPage + 1) * 50);
   state.visibleMembers = visible;
-  $('#members-body').innerHTML = visible.map(m => `<tr><td><input type="checkbox" data-select-member="${esc(m.nodeId)}" ${state.selection.has(m.nodeId) ? 'checked' : ''} aria-label="选择 ${esc(m.alias || m.nodeId)}"></td><td><div class="member-label"><span class="avatar">${esc(Array.from(m.alias || '#')[0])}</span><div>${esc(m.alias || '未提供别名')}${m.nodeId === state.data?.self?.nodeId ? '<small>本机设备</small>' : ''}<small>${esc(memberRole(m))}</small></div></div></td><td class="mono">${esc(m.nodeId)}</td><td class="mono muted">${esc(m.virtualIp || '未提供')}<small>${esc(m.virtualIpv6 || '')}</small></td><td><span class="status-pill ${m.online === true ? 'online' : m.online === false ? 'offline' : ''}">${esc(memberStatus(m))}</span><small>${esc(memberChannel(m))} · ${m.latencyMs == null ? '延迟未知' : `${m.latencyMs} ms`}</small></td><td class="mono muted">${esc(m.publicIp || '未提供')}</td><td><button class="text-btn" data-member-detail="${esc(m.nodeId)}">查看详情 ↗</button></td></tr>`).join('') || `<tr><td colspan="7">${empty('没有可显示的成员', currentNetwork() ? '试试其他搜索关键词。' : '先加入一个网络。', 'users')}</td></tr>`;
+  $('#members-body').innerHTML = visible.map(m => `<tr><td><input type="checkbox" data-select-member="${esc(m.nodeId)}" ${state.selection.has(m.nodeId) ? 'checked' : ''} aria-label="选择 ${esc(m.alias || m.nodeId)}"></td><td><div class="member-label"><span class="avatar">${esc(Array.from(m.alias || '#')[0])}</span><div>${esc(m.alias || '未提供别名')}${m.nodeId === state.data?.self?.nodeId ? '<small>本机设备</small>' : ''}<small>${esc(memberRole(m))}</small></div></div></td><td class="mono">${esc(m.nodeId)}</td><td class="mono muted">${esc(m.virtualIp || '未提供')}<small>${esc(m.virtualIpv6 || '')}</small></td><td><span class="status-pill ${memberStatus(m) === '在线' ? 'online' : memberStatus(m) === '离线' ? 'offline' : ''}">${esc(memberStatus(m))}</span><small>${esc(memberChannel(m))} · ${esc(latencyText(m))}</small></td><td class="mono muted">${esc(m.cloudNodeIp || m.publicIp || '未提供')}</td><td><button class="text-btn" data-member-detail="${esc(m.nodeId)}">查看详情 ↗</button></td></tr>`).join('') || `<tr><td colspan="7">${empty('没有可显示的成员', currentNetwork() ? '试试其他搜索关键词。' : '先加入一个网络。', 'users')}</td></tr>`;
+  probeMembers(visible);
+  visible.forEach((member, index) => {
+    const row = $('#members-body').rows[index];
+    if (!row) return;
+    const name = row.cells[1]?.querySelector('.member-label div');
+    if (name) {
+      const bars = document.createElement('span');
+      bars.className = 'latency-bars';
+      bars.textContent = latencyText(member).split(' ')[0];
+      name.prepend(bars, ' ');
+    }
+    if (row.cells[4]) {
+      const small = row.cells[4].querySelector('small');
+      if (small) small.textContent = memberChannel(member) + ' · ' + latencyText(member);
+    }
+    if (row.cells[5]) row.cells[5].textContent = member.cloudNodeIp || member.publicIp || '未提供';
+  });
   $('#members-summary').textContent = `共 ${list.length} 位匹配成员 · ${state.selection.size} 位已选`;
   $('#page-number').textContent = `${state.memberPage + 1} / ${max}`;
   $('#prev-page').disabled = state.memberPage === 0;
@@ -345,6 +447,16 @@ function renderMembers() {
   $('#select-page').indeterminate = visible.some(m => state.selection.has(m.nodeId)) && !$('#select-page').checked;
   $('#export-members').disabled = !list.length;
   updatePermissions();
+}
+function renderChat() {
+  const select = $('#chat-network');
+  if (!select) return;
+  const options = nets().map(n => `<option value="${esc(n.guid)}">${esc(n.name)} · ${n.members.length} 人</option>`).join('');
+  if (select.innerHTML !== options) select.innerHTML = options || '<option value="">暂无网络</option>';
+  select.value = state.selectedNetwork;
+  const query = $('#chat-search').value.trim();
+  const members = (currentNetwork()?.members || []).filter(m => fuzzyScore(`${m.alias || ''} ${m.nodeId} ${m.virtualIp || ''}`, query) >= 0);
+  $('#chat-members').innerHTML = members.map(m => `<article class="card network-card"><div class="network-card-top"><div class="network-avatar">${icon('message')}</div><span class="role-badge">${esc(memberStatus(m))}</span></div><h3>${esc(m.alias || '未提供别名')}</h3><p class="guid mono">${esc(m.virtualIp || '无虚拟 IPv4')} · ${esc(m.nodeId)}</p><div class="network-actions"><button class="btn small" data-chat-action="chat" data-chat-ip="${esc(m.virtualIp || '')}">文本聊天</button><button class="btn small" data-chat-action="voice" data-chat-ip="${esc(m.virtualIp || '')}">语音聊天</button><button class="text-btn" data-chat-action="full_control" data-chat-ip="${esc(m.virtualIp || '')}">远程控制</button></div></article>`).join('') || empty('没有匹配成员', '先选择网络或换个关键词。', 'users');
 }
 function renderActivity() {
   const row = a => `<div class="activity-row"><span class="activity-icon ${a.error ? 'error' : ''}">${icon(a.error ? 'activity' : 'check')}</span><span class="activity-message">${esc(a.message)}</span><time class="activity-time" datetime="${a.time}">${new Date(a.time).toLocaleTimeString('zh-CN', {
@@ -472,13 +584,57 @@ function exportSnapshot() {
   }, null, 2));
   toast('快照已导出，请妥善保管成员信息');
 }
+function exportBackup() {
+  if (!state.data) return toast('还没有可备份的状态', true);
+  const data = JSON.parse(JSON.stringify(state.data));
+  (data.networks || []).forEach(n => delete n.token);
+  download('rvpnkit-backup.json', JSON.stringify({
+    schema: 1,
+    exportedAt: new Date().toISOString(),
+    state: data,
+    favorites: [...state.favorites],
+    settings: {
+      theme: document.documentElement.dataset.theme,
+      interval: Number($('#refresh-interval').value),
+      compact: $('#compact-setting').checked
+    },
+    note: '网络密码不会写入备份；导入只恢复本地清单和界面偏好。'
+  }, null, 2));
+  toast('换机备份已导出');
+}
+$('#backup-export').onclick = exportBackup;
+$('#backup-import').onclick = () => $('#backup-file').click();
+$('#backup-file').onchange = async e => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const bundle = JSON.parse(await file.text());
+    if (bundle.schema !== 1 || !bundle.state || !Array.isArray(bundle.state.networks)) throw new Error('不是有效的 RvpnKit 备份');
+    state.data = bundle.state;
+    state.connected = false;
+    state.favorites = new Set(Array.isArray(bundle.favorites) ? bundle.favorites.filter(x => typeof x === 'string') : []);
+    storage.set('favorites', [...state.favorites]);
+    const settings = bundle.settings || {};
+    if (settings.theme) theme(settings.theme);
+    if ([0, 5, 10, 30].includes(Number(settings.interval))) $('#refresh-interval').value = String(settings.interval);
+    $('#compact-setting').checked = settings.compact === true;
+    document.body.classList.toggle('compact', $('#compact-setting').checked);
+    state.selectedNetwork = state.data.networks[0]?.guid || '';
+    renderData();
+    toast('备份已导入；服务中的网络成员需要手动核对');
+  } catch (error) {
+    toast(error.message || '备份读取失败', true);
+  } finally {
+    e.target.value = '';
+  }
+};
 function csvField(v) {
   let s = String(v ?? '');
   if (/^[\s]*[=+\-@]/.test(s) || /^[\t\r\n]/.test(s)) s = "'" + s;
   return '"' + s.replaceAll('"', '""') + '"';
 }
 $('#export-members').onclick = () => {
-  const rows = [['网络', '别名', '节点 ID', '虚拟 IPv4', '虚拟 IPv6', '公网 IP', '状态', '角色', '通道', '延迟 ms', '产品版本'], ...filteredMembers().map(m => [currentNetwork().name, m.alias, m.nodeId, m.virtualIp, m.virtualIpv6, m.publicIp, memberStatus(m), memberRole(m), memberChannel(m), m.latencyMs ?? '', m.productVersion || ''])];
+  const rows = [['网络', '别名', '节点 ID', '虚拟 IPv4', '虚拟 IPv6', '云端节点 IP', '状态', '角色', '通道', '延迟 ms', '产品版本'], ...filteredMembers().map(m => [currentNetwork().name, m.alias, m.nodeId, m.virtualIp, m.virtualIpv6, m.cloudNodeIp || m.publicIp, memberStatus(m), memberRole(m), memberChannel(m), latencyValue(m) ?? '', m.productVersion || ''])];
   download('rvpnkit-members.csv', '\ufeff' + rows.map(row => row.map(csvField).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 };
 $('#export-top').onclick = exportSnapshot;
@@ -500,6 +656,7 @@ $('#create-top').onclick = () => joinDialog(true);
 $('#copy-ip').onclick = () => copy(state.data?.self?.virtualIp || '');
 $('#network-search').oninput = renderNetworks;
 $('#network-role').onchange = renderNetworks;
+$('#network-kind').onchange = renderNetworks;
 $('#favorites-only').onclick = e => {
   state.favoritesOnly = !state.favoritesOnly;
   e.currentTarget.setAttribute('aria-pressed', state.favoritesOnly);
@@ -516,6 +673,19 @@ $('#member-search').oninput = () => {
   renderMembers();
 };
 $('#member-sort').onchange = renderMembers;
+$('#chat-network').onchange = e => {
+  state.selectedNetwork = e.target.value;
+  renderChat();
+};
+$('#chat-search').oninput = renderChat;
+$('#chat-official').onclick = async () => {
+  try {
+    await api('/api/desktop', {action: 'official'});
+    toast('已打开官方客户端');
+  } catch (error) {
+    toast(error.message, true);
+  }
+};
 $('#prev-page').onclick = () => {
   state.memberPage--;
   renderMembers();
@@ -551,15 +721,15 @@ $('#alias-form').onsubmit = async e => {
 $('#power-request').onclick = () => openDialog('发送 VPN 电源请求', '<p class="dialog-note">快照不提供可靠的电源状态。请选择要请求的目标状态。</p><label class="form-field">目标状态<select id="power-target"><option value="true">开启 VPN</option><option value="false">关闭 VPN</option></select></label>', '发送请求', () => command('/api/power', {
   on: $('#power-target').value === 'true'
 }, '切换 VPN 电源'));
-$('#public-form').onsubmit = async e => {
-  e.preventDefault();
+async function loadPublic(search = '') {
   if (state.publicLoading) return;
   state.publicLoading = true;
   $('#public-submit').disabled = true;
-  $('#public-summary').textContent = '正在向服务获取公共网络，请稍候…';
+  $('#public-summary').textContent = search ? '正在筛选公共网络…' : '正在后台读取公共网络列表…';
   try {
-    const data = await api('/api/public?search=' + encodeURIComponent($('#public-search').value.trim()));
+    const data = await api('/api/public?search=' + encodeURIComponent(search));
     state.publicResults = data.networks || [];
+    state.publicLoaded = true;
     $('#public-summary').textContent = `找到 ${state.publicResults.length} 个可加入的网络`;
     $('#public-results').innerHTML = state.publicResults.map((name, index) => `<article class="card network-card"><div class="network-card-top"><span class="network-avatar">${icon('compass')}</span><span class="role-badge">公共网络</span></div><h3 title="${esc(name)}">${esc(name)}</h3><p class="guid">由 Radmin VPN 服务提供</p><button class="btn" data-public-join="${index}">加入网络 →</button></article>`).join('') || empty('没有找到匹配网络', '换个关键词再试一次。', 'compass');
     log(`搜索公共网络，返回 ${state.publicResults.length} 个结果`);
@@ -572,6 +742,11 @@ $('#public-form').onsubmit = async e => {
     $('#public-submit').disabled = false;
     updatePermissions();
   }
+}
+$('#public-form').onsubmit = async e => {
+  e.preventDefault();
+  const search = $('#public-search').value.trim();
+  await loadPublic(search);
 };
 $('#dialog-close').onclick = $('#dialog-cancel').onclick = () => $('#action-dialog').close();
 $('#action-dialog').addEventListener('close', () => {
@@ -619,9 +794,14 @@ document.addEventListener('click', e => {
   if (b.dataset.copyGuid) copy(b.dataset.copyGuid);
   if (b.dataset.netAction) networkOperation(b.dataset.guid, b.dataset.netAction);
   if (b.dataset.publicJoin !== undefined) joinDialog(false, state.publicResults[Number(b.dataset.publicJoin)]);
+  if (b.dataset.chatAction) {
+    api('/api/desktop', {action: b.dataset.chatAction, address: b.dataset.chatIp || undefined})
+      .then(() => toast('已启动 Radmin 工具'))
+      .catch(error => toast(error.message, true));
+  }
   if (b.dataset.memberDetail) {
     const m = currentNetwork()?.members.find(m => m.nodeId === b.dataset.memberDetail);
-    if (m) openDialog('成员详情', `<dl class="details"><dt>别名</dt><dd>${esc(m.alias || '未提供')}</dd><dt>节点 ID</dt><dd class="mono">${esc(m.nodeId)}</dd><dt>虚拟 IPv4</dt><dd class="mono">${esc(m.virtualIp || '未提供')}</dd><dt>虚拟 IPv6</dt><dd class="mono">${esc(m.virtualIpv6 || '未提供')}</dd><dt>公网 IP</dt><dd class="mono">${esc(m.publicIp || '未提供')}</dd><dt>状态</dt><dd>${esc(memberStatus(m))}</dd><dt>角色</dt><dd>${esc(memberRole(m))}</dd><dt>通道</dt><dd>${esc(memberChannel(m))}</dd><dt>延迟</dt><dd>${m.latencyMs == null ? '未知' : `${m.latencyMs} ms`}</dd><dt>产品版本</dt><dd>${esc(m.productVersion || '未提供')}</dd><dt>所在网络</dt><dd>${esc(currentNetwork().name)}</dd></dl>`, '复制节点 ID', () => copy(m.nodeId));
+    if (m) openDialog('成员详情', `<dl class="details"><dt>别名</dt><dd>${esc(m.alias || '未提供')}</dd><dt>节点 ID</dt><dd class="mono">${esc(m.nodeId)}</dd><dt>虚拟 IPv4</dt><dd class="mono">${esc(m.virtualIp || '未提供')}</dd><dt>虚拟 IPv6</dt><dd class="mono">${esc(m.virtualIpv6 || '未提供')}</dd><dt>云端节点 IP</dt><dd class="mono">${esc(m.cloudNodeIp || m.publicIp || '未提供')}</dd><dt>状态</dt><dd>${esc(memberStatus(m))}</dd><dt>角色</dt><dd>${esc(memberRole(m))}</dd><dt>通道</dt><dd>${esc(memberChannel(m))}</dd><dt>延迟</dt><dd>${esc(latencyText(m))}</dd><dt>产品版本</dt><dd>${esc(m.productVersion || '未提供')}</dd><dt>所在网络</dt><dd>${esc(currentNetwork().name)}</dd></dl>`, '复制节点 ID', () => copy(m.nodeId));
   }
 });
 document.addEventListener('change', e => {

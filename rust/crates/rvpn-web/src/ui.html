@@ -61,6 +61,11 @@
           </span>
           发现网络
         </button>
+        <button data-page="chat">
+          <span data-icon="message">
+          </span>
+          聊天与远程
+        </button>
       </nav>
       <div class="nav-label">
         偏好与工具
@@ -362,6 +367,11 @@
                 我加入的
               </option>
             </select>
+            <select id="network-kind" aria-label="按网络类型筛选">
+              <option value="all">全部网络</option>
+              <option value="private">只看私有网络</option>
+              <option value="public">只看公共网络</option>
+            </select>
             <button class="btn" id="favorites-only" aria-pressed="false">
               ☆ 只看收藏
             </button>
@@ -445,7 +455,7 @@
                       状态 / 延迟
                     </th>
                     <th>
-                      公网 IP
+                      云端节点 IP
                     </th>
                     <th>
                       操作
@@ -503,6 +513,27 @@
           </div>
           <div class="network-grid" id="public-results">
           </div>
+        </section>
+        <section id="page-chat" class="page" hidden>
+          <div class="discovery-banner">
+            <span data-icon="message">
+            </span>
+            <div>
+              <h2>直接联系网络里的伙伴。</h2>
+              <p>优先调用 Radmin Viewer 的聊天入口；没有安装时再打开官方客户端。</p>
+            </div>
+          </div>
+          <div class="filterbar">
+            <select id="chat-network" aria-label="选择聊天网络"></select>
+            <div class="searchbox">
+              <span data-icon="search">
+              </span>
+              <input id="chat-search" aria-label="搜索聊天成员" placeholder="搜索成员名称、节点 ID 或虚拟 IP…">
+            </div>
+            <button class="btn" id="chat-official">打开官方客户端</button>
+          </div>
+          <div class="network-grid" id="chat-members"></div>
+          <div class="info-note">聊天协议由官方组件负责。RvpnKit 只负责筛选成员并传入虚拟地址，不伪造消息或绕过对端授权。</div>
         </section>
         <section id="page-activity" class="page" hidden>
           <div class="filterbar">
@@ -612,6 +643,17 @@
                   <button class="btn" id="export-settings">
                     导出 JSON
                   </button>
+                </div>
+                <div class="setting">
+                  <div>
+                    <b>换机备份</b>
+                    <p>保存网络清单、设备别名、收藏和界面设置，不包含密码令牌。</p>
+                  </div>
+                  <div class="button-row">
+                    <button class="btn" id="backup-export">导出备份</button>
+                    <button class="btn" id="backup-import">导入备份</button>
+                    <input id="backup-file" type="file" accept="application/json,.json" hidden>
+                  </div>
                 </div>
                 <div class="setting">
                   <div>

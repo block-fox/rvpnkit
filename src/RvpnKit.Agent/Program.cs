@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Diagnostics;
+using System.Net;
+using System.Net.NetworkInformation;
 using RvpnKit.Agent;
 using RvpnKit.Core;
 
@@ -31,6 +34,8 @@ for (int i = 0; i < args.Length; i++)
                   GET  /health
                   GET  /api/state[?refresh=1]
                   GET  /api/public[?search=]
+                  POST /api/probe            {"ips":["26.0.0.2"]}
+                  POST /api/desktop          {"action":"chat","address":"26.0.0.2"}
                   POST /api/power            {"on":true}
                   POST /api/alias            {"alias":"名字"}
                   POST /api/networks/join    {"name":"网络名"}
@@ -117,12 +122,21 @@ app.MapGet("/api/state", async (RvpnService svc, bool? refresh, CancellationToke
                 name = n.Name,
                 guid = n.GuidHex,
                 token = n.Token,
+                networkType = n.NetworkType,
                 memberCount = n.Members.Count,
                 members = n.Members.Select(m => new
                 {
                     nodeId = m.NodeId,
                     alias = m.Alias,
                     publicIp = m.PublicIp,
+                    cloudNodeIp = m.PublicIp,
+                    virtualIp = m.VirtualIp,
+                    virtualIpv6 = m.VirtualIpv6,
+                    online = m.Online,
+                    connectionStatus = m.ConnectionStatus,
+                    channelType = m.ChannelType,
+                    latencyMs = m.LatencyMs,
+                    connectionText = m.ConnectionText,
                 }),
             }),
         });
@@ -131,6 +145,77 @@ app.MapGet("/api/state", async (RvpnService svc, bool? refresh, CancellationToke
     {
         return Fail($"读取快照失败: {ex.Message}", StatusCodes.Status502BadGateway);
     }
+});
+
+// ── 本机延迟探测
+app.MapPost("/api/probe", async (ProbeRequest req, CancellationToken ct) =>
+{
+    if (req.Ips is null) return Fail("ips 必须为数组");
+    var ips = new List<IPAddress>();
+    foreach (string? value in req.Ips.Take(48))
+    {
+        if (!IPAddress.TryParse(value, out IPAddress? ip)) return Fail("ips 包含无效地址");
+        if (!ips.Contains(ip)) ips.Add(ip);
+    }
+
+    var results = await Task.WhenAll(ips.Select(async ip =>
+    {
+        using var ping = new Ping();
+        try
+        {
+            PingReply reply = await ping.SendPingAsync(ip, 700).WaitAsync(ct);
+            return new { ip = ip.ToString(), latencyMs = reply.Status == IPStatus.Success ? (long?)reply.RoundtripTime : null };
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return new { ip = ip.ToString(), latencyMs = (long?)null }; }
+    }));
+    return Ok(new { results });
+});
+
+// ── 官方客户端 / Radmin Viewer 入口
+app.MapPost("/api/desktop", (DesktopRequest req) =>
+{
+    string action = req.Action?.Trim().ToLowerInvariant() ?? "";
+    string? address = req.Address;
+    string? executable;
+    var arguments = new List<string>();
+    if (action == "official")
+    {
+        executable = FindFile("Radmin VPN", "RvRvpnGui.exe");
+        if (executable is null) return Fail("未找到官方客户端，请先安装 Radmin VPN", 409);
+        arguments.Add("/show");
+    }
+    else
+    {
+        if (!IPAddress.TryParse(address, out IPAddress? ip)) return Fail("需要有效的成员虚拟 IP", 400);
+        executable = FindViewer();
+        if (executable is null) return Fail("未找到 Radmin Viewer", 409);
+        arguments.Add($"/connect:{ip}");
+        switch (action)
+        {
+            case "full_control": break;
+            case "view_only": arguments.Add("/noinput"); break;
+            case "file_transfer": arguments.Add("/file"); break;
+            case "telnet": arguments.Add("/telnet"); break;
+            case "chat": arguments.Add("/chat"); break;
+            case "voice": arguments.Add("/voice"); break;
+            case "message": arguments.Add("/message"); break;
+            default: return Fail("不支持的系统工具操作");
+        }
+    }
+
+    try
+    {
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory,
+        };
+        foreach (string argument in arguments) start.ArgumentList.Add(argument);
+        Process.Start(start);
+        return Ok(new { message = "已启动 Radmin 工具" });
+    }
+    catch (Exception ex) { return Fail($"启动 Radmin 工具失败：{ex.Message}", 409); }
 });
 
 // ── 公共网络
@@ -316,3 +401,20 @@ internal sealed record PowerRequest(bool On);
 internal sealed record AliasRequest(string Alias);
 internal sealed record NameRequest(string Name);
 internal sealed record EnabledRequest(bool Enabled);
+internal sealed record ProbeRequest(string[]? Ips);
+internal sealed record DesktopRequest(string? Action, string? Address);
+
+static string? FindFile(string folder, string file)
+{
+    foreach (string root in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) })
+    {
+        if (string.IsNullOrWhiteSpace(root)) continue;
+        string path = Path.Combine(root, folder, file);
+        if (File.Exists(path)) return path;
+    }
+    return null;
+}
+
+static string? FindViewer()
+    => FindFile("Radmin VPN", "Radmin.exe")
+       ?? FindFile("Radmin Viewer 3", "Radmin.exe");

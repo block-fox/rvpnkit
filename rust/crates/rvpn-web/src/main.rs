@@ -17,6 +17,7 @@ const DEFAULT_ADDR: &str = "127.0.0.1:8788";
 
 static PIPE_GATE: Mutex<()> = Mutex::new(());
 static STATE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
+static PUBLIC_CACHE: Mutex<Option<(std::time::Instant, Vec<String>)>> = Mutex::new(None);
 static BACKEND: OnceLock<Backend> = OnceLock::new();
 
 fn backend() -> &'static Backend {
@@ -79,6 +80,14 @@ fn main() {
                 return;
             }
             _ => i += 1,
+        }
+    }
+
+    if !demo && agent.is_none() {
+        match rvpn_core::desktop::maybe_relaunch_elevated() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => eprintln!("{error}"),
         }
     }
 
@@ -383,6 +392,8 @@ fn route(req: &Request) -> (u16, &'static str, Vec<u8>) {
         ("GET", "/") => (200, "text/html; charset=utf-8", UI.as_bytes().to_vec()),
         ("GET", "/api/state") => api_state(&req.query),
         ("GET", "/api/public") => api_public(&req.query),
+        ("POST", "/api/probe") => api_probe(&req.body),
+        ("POST", "/api/desktop") => api_desktop(&req.body),
         ("POST", "/api/power") => api_power(&req.body),
         ("POST", "/api/alias") => api_alias(&req.body),
         ("POST", "/api/networks/join") => api_join(&req.body),
@@ -398,9 +409,11 @@ fn read_snapshot() -> Result<(SnapshotState, bool), String> {
     let mut pipe = PipeClient::connect(DEFAULT_PIPE).map_err(|e| e.to_string())?;
     let can_write = pipe.can_write();
     let raw = pipe
-        .read_snapshot(Duration::from_millis(2200))
+        .read_snapshot(Duration::from_millis(1200))
         .map_err(|e| e.to_string())?;
-    Ok((SnapshotState::parse(&raw), can_write))
+    let mut state = SnapshotState::parse(&raw);
+    rvpn_core::connections::enrich(&mut state);
+    Ok((state, can_write))
 }
 
 fn send(frame: Vec<u8>) -> Result<u32, String> {
@@ -415,6 +428,7 @@ fn send(frame: Vec<u8>) -> Result<u32, String> {
         rvpn_core::permissions::authorize(&frame, &state)?;
     }
     *STATE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *PUBLIC_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let rid = rvpn_core::Wire::request_id(&frame);
     let mut pipe = PipeClient::connect(DEFAULT_PIPE).map_err(|e| e.to_string())?;
     if !pipe.can_write() {
@@ -460,23 +474,56 @@ fn api_public(query: &str) -> (u16, &'static str, Vec<u8>) {
         Err(e) => return json_err(502, format!("读取状态失败：{e}")),
     };
 
-    let mut pipe = match PipeClient::connect(DEFAULT_PIPE) {
-        Ok(p) => p,
-        Err(e) => return json_err(502, e.to_string()),
+    let cached = PUBLIC_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(30))
+        .map(|(_, list)| list.clone());
+    let all = if let Some(list) = cached {
+        list
+    } else {
+        let mut pipe = match PipeClient::connect(DEFAULT_PIPE) {
+            Ok(p) => p,
+            Err(e) => return json_err(502, e.to_string()),
+        };
+        if !pipe.can_write() {
+            return json_err(409, "只读连接无法枚举公共网络（需要可写）");
+        }
+        if let Err(e) = pipe.send(&Commands::enum_public_networks("", next_request_id())) {
+            return json_err(502, e.to_string());
+        }
+        let raw = match pipe.read_snapshot(Duration::from_millis(1200)) {
+            Ok(r) => r,
+            Err(e) => return json_err(502, e.to_string()),
+        };
+        let list = PublicNetworks::extract_names(&raw);
+        *PUBLIC_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((std::time::Instant::now(), list.clone()));
+        list
     };
-    if !pipe.can_write() {
-        return json_err(409, "只读连接无法枚举公共网络（需要可写）");
-    }
-    if let Err(e) = pipe.send(&Commands::enum_public_networks("", next_request_id())) {
-        return json_err(502, e.to_string());
-    }
-    let raw = match pipe.read_snapshot(Duration::from_millis(2200)) {
-        Ok(r) => r,
-        Err(e) => return json_err(502, e.to_string()),
-    };
-
-    let list = PublicNetworks::available(&raw, &joined, search.as_deref());
+    let needle = search.unwrap_or_default().to_lowercase();
+    let list: Vec<_> = all
+        .into_iter()
+        .filter(|name| {
+            !joined.iter().any(|item| item == name)
+                && (needle.is_empty()
+                    || name.to_lowercase().contains(&needle)
+                    || fuzzy_subsequence(&name.to_lowercase(), &needle))
+        })
+        .collect();
     json_ok(serde_json::json!({ "count": list.len(), "networks": list }))
+}
+
+fn fuzzy_subsequence(haystack: &str, needle: &str) -> bool {
+    let mut cursor = 0;
+    for ch in needle.chars() {
+        let Some(offset) = haystack[cursor..].find(ch) else {
+            return false;
+        };
+        cursor += offset + ch.len_utf8();
+    }
+    true
 }
 
 fn body_str(body: &str, key: &str) -> Option<String> {
@@ -507,6 +554,54 @@ fn api_power(body: &str) -> (u16, &'static str, Vec<u8>) {
     match send(Commands::switch_power(on, next_request_id())) {
         Ok(rid) => json_ok(serde_json::json!({ "requestId": rid, "power": on })),
         Err(e) => json_err(409, e),
+    }
+}
+
+fn api_probe(body: &str) -> (u16, &'static str, Vec<u8>) {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return json_err(400, "请求体必须为 JSON"),
+    };
+    let Some(items) = value.get("ips").and_then(|v| v.as_array()) else {
+        return json_err(400, "ips 必须为数组");
+    };
+    let mut ips = Vec::new();
+    for item in items.iter().take(48) {
+        let Some(ip) = item.as_str() else {
+            return json_err(400, "ips 只能包含字符串");
+        };
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            return json_err(400, "ips 包含无效地址");
+        }
+        ips.push(ip.to_owned());
+    }
+    let results = rvpn_core::desktop::probe_many(&ips)
+        .into_iter()
+        .map(|(ip, latency)| serde_json::json!({"ip": ip, "latencyMs": latency}))
+        .collect::<Vec<_>>();
+    json_ok(serde_json::json!({"results": results}))
+}
+
+fn api_desktop(body: &str) -> (u16, &'static str, Vec<u8>) {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return json_err(400, "请求体必须为 JSON"),
+    };
+    let action = match value.get("action").and_then(|v| v.as_str()) {
+        Some("official") => rvpn_core::desktop::DesktopAction::Official,
+        Some("chat") => rvpn_core::desktop::DesktopAction::Chat,
+        Some("voice") => rvpn_core::desktop::DesktopAction::VoiceChat,
+        Some("message") => rvpn_core::desktop::DesktopAction::SendMessage,
+        Some("full_control") => rvpn_core::desktop::DesktopAction::FullControl,
+        Some("view_only") => rvpn_core::desktop::DesktopAction::ViewOnly,
+        Some("file_transfer") => rvpn_core::desktop::DesktopAction::FileTransfer,
+        Some("telnet") => rvpn_core::desktop::DesktopAction::Telnet,
+        _ => return json_err(400, "不支持的系统工具操作"),
+    };
+    let address = value.get("address").and_then(|v| v.as_str());
+    match rvpn_core::desktop::execute(action, address) {
+        Ok(message) => json_ok(serde_json::json!({"message": message})),
+        Err(error) => json_err(409, error),
     }
 }
 

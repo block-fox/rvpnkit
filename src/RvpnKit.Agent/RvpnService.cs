@@ -63,9 +63,22 @@ public sealed class RvpnService
 
         IEnumerable<string> q = all.Where(n => !joined.Contains(n));
         if (!string.IsNullOrWhiteSpace(search))
-            q = q.Where(n => n.Contains(search, StringComparison.OrdinalIgnoreCase));
+            q = q.Where(n => n.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || FuzzySubsequence(n, search));
 
         return q.Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToList();
+    }
+
+    private static bool FuzzySubsequence(string value, string query)
+    {
+        int cursor = 0;
+        foreach (char ch in query)
+        {
+            int found = value.IndexOf(ch, cursor, StringComparison.OrdinalIgnoreCase);
+            if (found < 0) return false;
+            cursor = found + 1;
+        }
+        return true;
     }
 
     /// <summary>下发一条命令，返回请求编号。</summary>

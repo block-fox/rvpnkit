@@ -415,7 +415,7 @@ impl App {
             if ui.button("导出当前筛选 CSV").clicked() {
                 if let Some(n) = self.current_network() {
                     let q = self.filter.trim().to_lowercase();
-                    let mut content = String::from("\u{feff}网络,别名,节点 ID,公网 IP,虚拟 IPv4,虚拟 IPv6,状态,角色,延迟 ms\r\n");
+                    let mut content = String::from("\u{feff}网络,别名,节点 ID,云端节点 IP,虚拟 IPv4,虚拟 IPv6,状态,角色,延迟 ms\r\n");
                     for m in &self.member_rows(n) {
                         if format!(
                             "{} {} {}",
@@ -432,7 +432,7 @@ impl App {
                                     m.alias.as_deref().unwrap_or(""),
                                     &m.node_id.to_string(),
                                     m.public_ip.as_deref().unwrap_or(""),
-                                    m.virtual_ip.as_deref().unwrap_or(""),m.virtual_ipv6.as_deref().unwrap_or(""),m.status_text(),m.role_text(),&m.latency_ms.map(|v|v.to_string()).unwrap_or_default(),
+                                    m.virtual_ip.as_deref().unwrap_or(""),m.virtual_ipv6.as_deref().unwrap_or(""),m.status_text(),m.role_text(),&self.measured_latency(m).map(|v|v.to_string()).unwrap_or_default(),
                                 ]
                                 .iter()
                                 .map(|s| csv_field(s))

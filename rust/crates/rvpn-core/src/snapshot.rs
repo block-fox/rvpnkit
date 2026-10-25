@@ -44,6 +44,10 @@ pub struct MemberInfo {
     pub connection_status: Option<u32>,
     pub channel_type: Option<u32>,
     pub latency_ms: Option<u32>,
+    /// Read-only connection mode parsed from the official service log.
+    pub connection_via: Option<String>,
+    /// Read-only connection result parsed from the official service log.
+    pub connection_ok: Option<bool>,
     pub product_version: Option<String>,
 }
 impl MemberInfo {
@@ -57,10 +61,26 @@ impl MemberInfo {
             .unwrap_or_else(|| format!("#{}", self.node_id))
     }
     pub fn online(&self) -> Option<bool> {
+        if let Some(value) = self.connection_ok {
+            return Some(value);
+        }
         match self.connection_status {
             Some(0) => Some(false),
             Some(1) => Some(true),
             _ => None,
+        }
+    }
+    pub fn connection_text(&self) -> &'static str {
+        if self.online() == Some(false) {
+            return "未连接";
+        }
+        match self.connection_via.as_deref() {
+            Some(v) if v.starts_with("UDP") => "UDP 直连",
+            Some(v) if v.starts_with("TCP") => "TCP 直连",
+            Some(v) if v.to_ascii_lowercase().contains("relay") => "中继",
+            Some(_) => "已连接",
+            None if self.online() == Some(true) => "已连接",
+            _ => "连接未知",
         }
     }
     pub fn status_text(&self) -> &'static str {
@@ -307,10 +327,26 @@ impl PublicNetworks {
         let needle = search.unwrap_or_default().to_lowercase();
         let mut names: Vec<_> = Self::extract_names(raw)
             .into_iter()
-            .filter(|n| !joined.contains(n) && n.to_lowercase().contains(&needle))
+            .filter(|n| {
+                !joined.contains(n)
+                    && (needle.is_empty()
+                        || n.to_lowercase().contains(&needle)
+                        || fuzzy_subsequence(&n.to_lowercase(), &needle))
+            })
             .collect();
         names.sort();
         names.dedup();
         names
     }
+}
+
+fn fuzzy_subsequence(haystack: &str, needle: &str) -> bool {
+    let mut cursor = 0;
+    for ch in needle.chars() {
+        let Some(offset) = haystack[cursor..].find(ch) else {
+            return false;
+        };
+        cursor += offset + ch.len_utf8();
+    }
+    true
 }

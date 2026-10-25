@@ -1,4 +1,5 @@
 use super::*;
+use crate::client_ui::fuzzy_match;
 
 impl App {
     // ── 网络页
@@ -22,6 +23,7 @@ impl App {
                     .desired_width(260.0),
             );
             ui.checkbox(&mut self.favorites_only, "只看收藏");
+            ui.checkbox(&mut self.private_only, "只看私有网络");
         });
         ui.add_space(12.0);
 
@@ -54,12 +56,10 @@ impl App {
                 .show(ui, |ui| {
                     for (i, net) in st.networks.iter().enumerate() {
                         let q = self.network_filter.trim().to_lowercase();
-                        if (!q.is_empty()
-                            && !format!("{} {}", net.name, net.guid_hex())
-                                .to_lowercase()
-                                .contains(&q))
+                        if !fuzzy_match(&format!("{} {}", net.name, net.guid_hex()), &q)
                             || (self.favorites_only
                                 && !self.preferences.favorites.contains(&net.guid_hex()))
+                            || (self.private_only && net.network_type != Some(0))
                         {
                             continue;
                         }
@@ -88,7 +88,15 @@ impl App {
                                     } else {
                                         "◇"
                                     },
-                                    net.name
+                                    format!(
+                                        "{}  [{}]",
+                                        net.name,
+                                        if net.network_type == Some(0) {
+                                            "私有"
+                                        } else {
+                                            "公共 / 未知"
+                                        }
+                                    )
                                 ),
                                 egui::FontId::proportional(13.0),
                                 if selected { p.accent } else { p.fg },
@@ -361,7 +369,7 @@ impl App {
                         ui.label(RichText::new("别名").size(11.5).color(p.faint));
                     });
                     header.col(|ui| {
-                        ui.label(RichText::new("公网 IP").size(11.5).color(p.faint));
+                        ui.label(RichText::new("云端节点 IP").size(11.5).color(p.faint));
                     });
                     header.col(|ui| {
                         ui.label(RichText::new("虚拟 IP").size(11.5).color(p.faint));
@@ -406,11 +414,8 @@ impl App {
                                         RichText::new(format!(
                                             "{} · {} · {}",
                                             m.status_text(),
-                                            m.role_text(),
-                                            m.latency_ms
-                                                .filter(|_| m.online() == Some(true))
-                                                .map(|v| format!("{v} ms"))
-                                                .unwrap_or_else(|| "—".into())
+                                            m.connection_text(),
+                                            self.latency_label(&m)
                                         ))
                                         .size(10.0)
                                         .color(p.muted),
@@ -517,7 +522,7 @@ impl App {
                                     ui.output_mut(|o| o.copied_text = node.to_string());
                                     ui.close_menu();
                                 }
-                                if ui.button("复制公网 IP").clicked() {
+                                if ui.button("复制云端节点 IP").clicked() {
                                     let ip = m2.public_ip.clone().unwrap_or_default();
                                     ui.output_mut(|o| o.copied_text = ip);
                                     ui.close_menu();
@@ -817,7 +822,7 @@ impl App {
                 ),
                 (
                     "成员的虚拟 IP / IPv6 / 通道类型",
-                    "这些属于数据面信息，控制面快照只提供别名、公网 IP 和节点 ID。",
+                    "这些属于数据面信息，控制面快照只提供别名、云端节点 IP 和节点 ID。",
                 ),
                 (
                     "网络改名",

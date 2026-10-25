@@ -28,7 +28,7 @@ use backend::{read_public, read_state, send_frame};
 use preferences::Preferences;
 use theme::Palette;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -85,6 +85,7 @@ impl Page {
 enum Msg {
     State(SnapshotState, bool),
     Public(Vec<String>),
+    Probed(Vec<(String, Option<u32>)>),
     Sent(String),
     Error(String),
     Tool(Result<String, String>),
@@ -93,6 +94,7 @@ enum Msg {
 enum Job {
     Refresh,
     Public(String),
+    Probe(Vec<String>),
     Send(Vec<Vec<u8>>, String),
     Desktop(rvpn_core::desktop::DesktopAction, Option<String>),
 }
@@ -120,11 +122,13 @@ struct App {
     status: String,
     can_write: bool,
     busy: bool,
+    refreshing: bool,
     demo: bool,
     connected: bool,
     preferences: Preferences,
     network_filter: String,
     favorites_only: bool,
+    private_only: bool,
     activity: VecDeque<(String, String)>,
     confirm: Option<(Vec<Vec<u8>>, String)>,
     export_directory: String,
@@ -134,6 +138,7 @@ struct App {
     job_tx: Option<Sender<Job>>,
     backend: String,
     palette: Palette,
+    measured_latency: HashMap<String, Option<u32>>,
 }
 
 impl App {
@@ -169,6 +174,10 @@ impl App {
                                 let _ = tx.send(Msg::Error(e));
                             }
                         },
+                        Job::Probe(addresses) => {
+                            let _ =
+                                tx.send(Msg::Probed(rvpn_core::desktop::probe_many(&addresses)));
+                        }
                         Job::Send(frames, label) => {
                             let mut sent = 0;
                             let result = frames.iter().try_for_each(|frame| {
@@ -243,12 +252,14 @@ impl App {
             status: "正在读取状态…".into(),
             can_write: false,
             busy: true,
+            refreshing: true,
             audit,
             demo,
             connected: false,
             preferences,
             network_filter: String::new(),
             favorites_only: false,
+            private_only: false,
             activity: VecDeque::new(),
             confirm: None,
             export_directory: std::env::current_dir()
@@ -260,6 +271,7 @@ impl App {
             job_tx: Some(job_tx),
             backend: "直连管道".into(),
             palette: Palette::by_dark(dark),
+            measured_latency: HashMap::new(),
         };
         if demo {
             app.state = Some(rvpn_core::presentation::demo_state());
@@ -304,10 +316,10 @@ impl App {
         self.confirm = Some((frames, label));
     }
     fn refresh(&mut self) {
-        if self.demo || self.busy {
+        if self.demo || self.refreshing {
             return;
         }
-        self.busy = true;
+        self.refreshing = true;
         self.last_refresh = Instant::now();
         self.submit(Job::Refresh);
     }
@@ -364,6 +376,7 @@ impl App {
                     }
                     self.state = Some(st);
                     self.busy = false;
+                    self.refreshing = false;
                     self.last_refresh = Instant::now();
                     self.clamp_selection();
                     let ids: HashSet<_> = self
@@ -372,6 +385,18 @@ impl App {
                         .unwrap_or_default();
                     self.selected_members.retain(|id| ids.contains(id));
                     self.status = self.summary();
+                    let addresses = self
+                        .current_network()
+                        .map(|n| {
+                            n.members
+                                .iter()
+                                .filter_map(|m| m.virtual_ip.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if !addresses.is_empty() {
+                        self.submit(Job::Probe(addresses));
+                    }
                     if self.want_props {
                         self.want_props = false;
                         if let Some(n) = self.current_network() {
@@ -383,11 +408,17 @@ impl App {
                 }
                 Msg::Public(list) => {
                     self.busy = false;
+                    self.refreshing = false;
                     self.status = format!("公共网络 {} 个", list.len());
                     self.public_selected = if list.is_empty() { None } else { Some(0) };
                     self.public_list = list;
                     self.last_refresh = Instant::now();
                     self.record(&format!("公共网络搜索：{} 个结果", self.public_list.len()));
+                }
+                Msg::Probed(results) => {
+                    for (address, latency) in results {
+                        self.measured_latency.insert(address, latency);
+                    }
                 }
                 Msg::Sent(label) => {
                     self.busy = false;
@@ -398,6 +429,7 @@ impl App {
                 }
                 Msg::Error(e) => {
                     self.busy = false;
+                    self.refreshing = false;
                     self.last_refresh = Instant::now();
                     self.connected = false;
                     self.can_write = false;
@@ -406,6 +438,7 @@ impl App {
                 }
                 Msg::Tool(result) => {
                     self.busy = false;
+                    self.refreshing = false;
                     self.last_refresh = Instant::now();
                     match result {
                         Ok(text) => {
@@ -501,6 +534,18 @@ impl App {
         style.visuals.override_text_color = Some(p.fg);
 
         style.spacing.item_spacing = egui::vec2(10.0, 9.0);
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(23.0));
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(10.0);
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
         style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
@@ -548,7 +593,9 @@ fn install_fonts(ctx: &egui::Context) {
                 .font_data
                 .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
             if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                list.insert(0, "cjk".to_owned());
+                // Keep egui's Latin font first; use the Windows CJK face as a fallback so
+                // mixed Chinese/Latin labels do not suddenly change visual weight.
+                list.push("cjk".to_owned());
             }
             if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
                 list.push("cjk".to_owned());
@@ -890,6 +937,13 @@ impl App {
 }
 
 fn main() -> eframe::Result<()> {
+    if !std::env::args().any(|a| a == "--demo") {
+        match rvpn_core::desktop::maybe_relaunch_elevated() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => eprintln!("{error}"),
+        }
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(if std::env::args().any(|a| a == "--screenshot-dir") {

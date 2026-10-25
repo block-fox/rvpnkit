@@ -276,10 +276,10 @@ impl PipeClient {
     /// 读取一段快照数据。
     ///
     /// 用 `PeekNamedPipe` 轮询可读字节，这样能在不阻塞线程的前提下实现超时；
-    /// 一旦有数据后空闲超过 300ms 就认为这一批读完。
+    /// 一旦有数据后空闲超过 120ms 就认为这一批读完。
     pub fn read_snapshot(&mut self, timeout: Duration) -> Result<Vec<u8>, PipeError> {
         let start = Instant::now();
-        let idle = Duration::from_millis(300);
+        let idle = Duration::from_millis(120);
         let mut out = Vec::new();
         let mut last_data = Instant::now();
         let mut buf = vec![0u8; 64 * 1024];

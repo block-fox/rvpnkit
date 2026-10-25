@@ -2,6 +2,22 @@
 use super::*;
 use rvpn_core::desktop::{self, DesktopAction, VIEWER_ACTIONS};
 
+pub(super) fn fuzzy_match(value: &str, query: &str) -> bool {
+    let hay = value.to_lowercase();
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() || hay.contains(&needle) {
+        return true;
+    }
+    let mut cursor = 0;
+    for ch in needle.chars() {
+        let Some(offset) = hay[cursor..].find(ch) else {
+            return false;
+        };
+        cursor += offset + ch.len_utf8();
+    }
+    true
+}
+
 #[derive(Default)]
 pub(super) struct ClientUi {
     pub output: Option<String>,
@@ -15,6 +31,29 @@ pub(super) struct ClientUi {
     pub reveal_password: bool,
 }
 impl App {
+    pub(super) fn measured_latency(&self, member: &MemberInfo) -> Option<u32> {
+        member
+            .virtual_ip
+            .as_ref()
+            .and_then(|ip| self.measured_latency.get(ip).copied().flatten())
+    }
+
+    pub(super) fn latency_label(&self, member: &MemberInfo) -> String {
+        match self.measured_latency(member) {
+            Some(ms) => {
+                let bars = match ms {
+                    0..=30 => "▮▮▮▮",
+                    31..=80 => "▮▮▮▫",
+                    81..=160 => "▮▮▫▫",
+                    _ => "▮▫▫▫",
+                };
+                format!("{bars} {ms} ms")
+            }
+            None if member.online() == Some(true) => "测量中…".into(),
+            None => "—".into(),
+        }
+    }
+
     pub(super) fn member_rows(&self, net: &NetworkInfo) -> Vec<MemberInfo> {
         let q = self.filter.trim().to_lowercase();
         let mut rows: Vec<_> = net
@@ -29,7 +68,7 @@ impl App {
                     m.virtual_ip.as_deref().unwrap_or(""),
                     m.virtual_ipv6.as_deref().unwrap_or("")
                 );
-                search.to_lowercase().contains(&q)
+                fuzzy_match(&search, &q)
                     && (self.client.member_status == 0
                         || match self.client.member_status {
                             1 => m.online() == Some(true),
@@ -45,9 +84,16 @@ impl App {
             1 => a.node_id.cmp(&b.node_id),
             2 => a.virtual_ip.cmp(&b.virtual_ip),
             3 => a
-                .latency_ms
+                .virtual_ip
+                .as_ref()
+                .and_then(|ip| self.measured_latency.get(ip).copied().flatten())
                 .unwrap_or(u32::MAX)
-                .cmp(&b.latency_ms.unwrap_or(u32::MAX)),
+                .cmp(
+                    &b.virtual_ip
+                        .as_ref()
+                        .and_then(|ip| self.measured_latency.get(ip).copied().flatten())
+                        .unwrap_or(u32::MAX),
+                ),
             _ => a.label().to_lowercase().cmp(&b.label().to_lowercase()),
         });
         rows
@@ -105,17 +151,72 @@ impl App {
         self.page_header(ui, "聊天", "官方互通组件");
         self.hint(
             ui,
-            "官方 2.1 聊天采用独立的认证服务。本页明确使用已安装的官方组件，不模拟消息发送。",
+            "选择成员后直接调用 Radmin Viewer 的文本聊天、语音聊天或远程控制。",
         );
+        let members = self
+            .current_network()
+            .map(|network| network.members.clone())
+            .unwrap_or_default();
         card(ui, self.palette, |ui| {
-            ui.label(
-                RichText::new("和同一网络里的伙伴保持联系")
-                    .size(21.0)
-                    .strong(),
-            );
+            ui.label(RichText::new("网络成员").size(21.0).strong());
             ui.add_space(12.0);
-            ui.label("群聊 · 私聊 · 消息历史 · 回复与编辑 · 表情 · 未读与通知 · 屏蔽与禁言");
-            ui.add_space(12.0);
+            if members.is_empty() {
+                ui.label(RichText::new("当前网络还没有成员快照。").color(self.palette.muted));
+            }
+            for peer in members.iter().take(40) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(peer.label()).strong());
+                    ui.label(RichText::new(peer.status_text()).color(self.palette.muted));
+                    ui.label(
+                        RichText::new(self.latency_label(peer))
+                            .monospace()
+                            .color(self.palette.muted),
+                    );
+                    if ui
+                        .add_enabled(
+                            peer.virtual_ip.is_some() && !self.demo,
+                            egui::Button::new("文本聊天"),
+                        )
+                        .clicked()
+                    {
+                        self.desktop_action(
+                            DesktopAction::Chat,
+                            peer.virtual_ip.clone(),
+                            "Radmin 文本聊天",
+                        );
+                    }
+                    if ui
+                        .add_enabled(
+                            peer.virtual_ip.is_some() && !self.demo,
+                            egui::Button::new("语音聊天"),
+                        )
+                        .clicked()
+                    {
+                        self.desktop_action(
+                            DesktopAction::VoiceChat,
+                            peer.virtual_ip.clone(),
+                            "Radmin 语音聊天",
+                        );
+                    }
+                    if ui
+                        .add_enabled(
+                            peer.virtual_ip.is_some() && !self.demo,
+                            egui::Button::new("远程控制"),
+                        )
+                        .clicked()
+                    {
+                        self.desktop_action(
+                            DesktopAction::FullControl,
+                            peer.virtual_ip.clone(),
+                            "Radmin 远程控制",
+                        );
+                    }
+                });
+            }
+        });
+        ui.add_space(16.0);
+        card(ui, self.palette, |ui| {
+            ui.label("官方客户端聊天");
             if ui
                 .add_enabled(!self.demo, egui::Button::new("打开官方聊天与网络窗口"))
                 .clicked()
@@ -127,15 +228,8 @@ impl App {
                 );
             }
             ui.label(
-                RichText::new("此功能为官方桥接，尚未实现第三方原生聊天协议。")
-                    .small()
-                    .color(self.palette.muted),
+                "Radmin Viewer 需要对端安装 Radmin Server，并且聊天或远程控制权限由对端策略决定。",
             );
-        });
-        ui.add_space(16.0);
-        card(ui, self.palette, |ui| {
-            ui.label("其他聊天工具");
-            ui.label("成员右键菜单中的 Radmin 文本/语音聊天使用 Radmin Viewer，需要对端安装 Radmin Server。两种聊天服务彼此独立。");
         });
     }
     pub(super) fn page_tools(&mut self, ui: &mut egui::Ui) {
@@ -147,6 +241,9 @@ impl App {
                 if let Some(peer)=self.props.clone(){ui.label(format!("当前成员：{}",peer.label()));self.peer_actions(ui,&peer);}
                 ui.horizontal_wrapped(|ui|{
                     for(action,label)in[(DesktopAction::Adapters,"网络适配器"),(DesktopAction::Logs,"打开服务日志"),(DesktopAction::Official,"官方客户端 / 驱动修复 / 防火墙例外")]{if ui.add_enabled(!self.demo,egui::Button::new(label)).clicked(){self.desktop_action(action,None,label);}}
+                });
+                ui.horizontal_wrapped(|ui|{
+                    for(action,label)in[(DesktopAction::IpBackup,"备份 Radmin IP"),(DesktopAction::IpReset,"重置虚拟 IP"),(DesktopAction::IpChangeMac,"切换虚拟 MAC")]{if ui.add_enabled(!self.demo,egui::Button::new(label)).clicked(){self.desktop_action(action,None,label);}}
                 });
             });ui.add_space(14.0);
             card(ui,self.palette,|ui|{

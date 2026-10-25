@@ -8,7 +8,7 @@ pub fn state_json(state: &SnapshotState, can_write: bool, demo: bool) -> Value {
         "canWrite": can_write, "demo": demo, "power":state.power, "serviceState":state.service_state,
         "self": state.me.as_ref().map(|m| json!({
             "nodeId": m.node_id.to_string(), "alias": m.alias,
-            "publicIp": m.public_ip, "virtualIp": m.virtual_ip, "virtualIpv6":m.virtual_ipv6,
+            "publicIp": m.public_ip, "cloudNodeIp": m.public_ip, "virtualIp": m.virtual_ip, "virtualIpv6":m.virtual_ipv6,
         })),
         "networkCount": state.networks.len(), "memberCount": state.member_count(),
         "uniqueMemberCount": state.networks.iter().flat_map(|n| n.members.iter().map(|m| m.node_id)).collect::<HashSet<_>>().len(),
@@ -17,10 +17,11 @@ pub fn state_json(state: &SnapshotState, can_write: bool, demo: bool) -> Value {
             "name": n.name, "guid": n.guid_hex(), "role": n.role, "networkType":n.network_type,
             "enabled":n.enabled,"blockNewMembers":n.block_new_members,"allowPasswordless":n.allow_passwordless,"community":n.community,
             "members": n.members.iter().map(|m| json!({
-                "nodeId": m.node_id.to_string(), "alias": m.alias, "publicIp": m.public_ip,
+                "nodeId": m.node_id.to_string(), "alias": m.alias, "publicIp": m.public_ip, "cloudNodeIp": m.public_ip,
                 "virtualIp":m.virtual_ip,"virtualIpv6":m.virtual_ipv6,"role":m.role,
                 "online":m.online(),"connectionStatus":m.connection_status,"channelType":m.channel_type,
-                "latencyMs":m.latency_ms,"productVersion":m.product_version,
+                "latencyMs":m.latency_ms,"connectionVia":m.connection_via,"connectionOk":m.connection_ok,
+                "connectionText":m.connection_text(),"productVersion":m.product_version,
             })).collect::<Vec<_>>()
         })).collect::<Vec<_>>()
     })
@@ -69,6 +70,8 @@ pub fn demo_state() -> SnapshotState {
                     connection_status: Some(if j % 4 == 3 { 0 } else { 1 }),
                     channel_type: Some(0),
                     latency_ms: Some(8 + j as u32 * 3),
+                    connection_via: Some("UDP/outgoing".into()),
+                    connection_ok: Some(j % 4 != 3),
                     product_version: Some("2.1.1".into()),
                 })
                 .collect(),

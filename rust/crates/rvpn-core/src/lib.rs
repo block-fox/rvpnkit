@@ -20,6 +20,7 @@
 //! 发送时最外层还要再套一个 `u32 LE` 长度前缀（由传输层负责）。
 
 pub mod commands;
+pub mod connections;
 pub mod desktop;
 pub mod operation;
 pub mod permissions;

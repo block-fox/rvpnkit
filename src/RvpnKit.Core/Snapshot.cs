@@ -6,7 +6,8 @@
 /// <param name="Token">快照字段 0x47 的字符串。<b>含义未确认</b>：13 个网络的取值完全相同，且其中多个是免密码加入的，所以它大概率不是密码，更像某种会话令牌。</param>
 /// <param name="Members">该网络下的成员。</param>
 public sealed record NetworkInfo(string Name, byte[] Guid, string? Token,
-                                 IReadOnlyList<MemberInfo> Members)
+                                 IReadOnlyList<MemberInfo> Members,
+                                 uint? NetworkType = null)
 {
     /// <summary>GUID 的十六进制表示（无连字符），便于命令行/HTTP 传参。</summary>
     public string GuidHex => Convert.ToHexString(Guid).ToLowerInvariant();
@@ -16,19 +17,38 @@ public sealed record NetworkInfo(string Name, byte[] Guid, string? Token,
 /// <param name="NodeId">节点 ID，踢人/授管等命令要用它。</param>
 /// <param name="Alias">对方别名，可能为空。</param>
 /// <param name="PublicIp">对方的公网出口 IP（快照字段 0xc9）。</param>
-public sealed record MemberInfo(ulong NodeId, string? Alias, string? PublicIp)
+public sealed record MemberInfo(ulong NodeId, string? Alias, string? PublicIp,
+                                string? VirtualIp = null, string? VirtualIpv6 = null,
+                                uint? ConnectionStatus = null, uint? ChannelType = null,
+                                uint? LatencyMs = null)
 {
     /// <summary>便于显示的标签。</summary>
     public string Label => Alias is { Length: > 0 } ? Alias
         : PublicIp is { Length: > 0 } ? PublicIp
         : $"#{NodeId}";
+
+    public bool? Online => ConnectionStatus switch
+    {
+        0 => false,
+        1 => true,
+        _ => null,
+    };
+
+    public string ConnectionText => Online == false ? "未连接" : ChannelType switch
+    {
+        0 => "直连",
+        1 => "中继",
+        _ when Online == true => "已连接",
+        _ => "连接未知",
+    };
 }
 
 /// <summary>本机信息。</summary>
 /// <param name="NodeId">本机节点 ID。</param>
 /// <param name="Alias">本机别名。</param>
 /// <param name="PublicIp">本机公网出口 IP。</param>
-public sealed record SelfInfo(ulong NodeId, string? Alias, string? PublicIp);
+public sealed record SelfInfo(ulong NodeId, string? Alias, string? PublicIp,
+                              string? VirtualIp = null, string? VirtualIpv6 = null);
 
 /// <summary>从管道快照里解析出来的整体状态。</summary>
 /// <param name="Self">本机信息。</param>
@@ -78,8 +98,8 @@ public static class Snapshot
     /// <summary>解析快照。</summary>
     public static SnapshotState Parse(ReadOnlySpan<byte> raw)
     {
-        var networkSeeds = new List<(string Name, byte[] Guid, string? Token, List<ulong> MemberIds)>();
-        var profiles = new Dictionary<ulong, (string? Alias, string? Ip)>();
+        var networkSeeds = new List<(string Name, byte[] Guid, string? Token, uint? NetworkType, List<ulong> MemberIds)>();
+        var profiles = new Dictionary<ulong, (string? Alias, string? Ip, string? V4, string? V6, uint? Status, uint? Channel, uint? Latency)>();
         var nodes = new SortedSet<ulong>();
         SelfInfo? self = null;
 
@@ -94,15 +114,15 @@ public static class Snapshot
             seed.MemberIds.Select(id =>
             {
                 profiles.TryGetValue(id, out var p);
-                return new MemberInfo(id, p.Alias, p.Ip);
-            }).ToList())).ToList();
+                return new MemberInfo(id, p.Alias, p.Ip, p.V4, p.V6, p.Status, p.Channel, p.Latency);
+            }).ToList(), seed.NetworkType)).ToList();
 
         return new SnapshotState(self, networks, nodes.ToList());
     }
 
     private static void Walk(List<Record> records,
-                             List<(string, byte[], string?, List<ulong>)> networks,
-                             Dictionary<ulong, (string?, string?)> profiles,
+                             List<(string, byte[], string?, uint?, List<ulong>)> networks,
+                             Dictionary<ulong, (string?, string?, string?, string?, uint?, uint?, uint?)> profiles,
                              SortedSet<ulong> nodes,
                              ref SelfInfo? self,
                              int depth)
@@ -111,6 +131,7 @@ public static class Snapshot
         ulong? localNode = null;
         string? localAlias = null;
         string? localIp = null;
+        (string? V4, string? V6) localAddresses = Addresses(records);
 
         foreach (Record r in records)
         {
@@ -131,10 +152,11 @@ public static class Snapshot
         }
 
         if (depth <= 1 && localNode is not null && self is null)
-            self = new SelfInfo(localNode.Value, localAlias, localIp);
+            self = new SelfInfo(localNode.Value, localAlias, localIp, localAddresses.V4, localAddresses.V6);
 
         if (localNode is not null && depth >= 2 && localAlias is not null)
-            profiles.TryAdd(localNode.Value, (localAlias, localIp));
+            profiles.TryAdd(localNode.Value, (localAlias, localIp, localAddresses.V4, localAddresses.V6,
+                Scalar(records, 0x21), Scalar(records, 0x26), Scalar(records, 0x3e)));
 
         foreach (Record r in records)
         {
@@ -151,12 +173,13 @@ public static class Snapshot
     }
 
     private static void ParseNetwork(IReadOnlyList<Record> children,
-                                     List<(string, byte[], string?, List<ulong>)> networks,
+                             List<(string, byte[], string?, uint?, List<ulong>)> networks,
                                      SortedSet<ulong> nodes)
     {
         string? name = null;
         string? password = null;
         byte[]? guid = null;
+        uint? networkType = null;
         var members = new List<ulong>();
 
         foreach (Record c in children)
@@ -175,6 +198,9 @@ public static class Snapshot
                 }
             }
 
+            if (c.Field == 0x0a && (c.Type == (byte)RecordType.UInt32 || c.Type == (byte)RecordType.UInt32Alt))
+                networkType = c.AsUInt32();
+
             if (c.Field == FieldContainerMember && c.Children is not null)
             {
                 foreach (Record m in c.Children)
@@ -191,11 +217,11 @@ public static class Snapshot
         }
 
         if (guid is not null && name is not null)
-            networks.Add((name, guid, password, members));
+            networks.Add((name, guid, password, networkType, members));
     }
 
     private static void ParseProfile(IReadOnlyList<Record> children,
-                                     Dictionary<ulong, (string?, string?)> profiles,
+                                     Dictionary<ulong, (string?, string?, string?, string?, uint?, uint?, uint?)> profiles,
                                      SortedSet<ulong> nodes)
     {
         ulong? node = null;
@@ -221,7 +247,41 @@ public static class Snapshot
         }
 
         if (node is not null)
-            profiles.TryAdd(node.Value, (alias, ip));
+        var addresses = Addresses(children);
+        profiles.TryAdd(node.Value, (alias, ip, addresses.V4, addresses.V6,
+            Scalar(children, 0x21), Scalar(children, 0x26), Scalar(children, 0x3e)));
+    }
+
+    private static uint? Scalar(IReadOnlyList<Record> records, byte field)
+    {
+        foreach (Record record in records)
+            if (record.Field == field
+                && (record.Type == (byte)RecordType.UInt32 || record.Type == (byte)RecordType.UInt32Alt)
+                && record.Payload.Length >= 4)
+                return record.AsUInt32();
+        return null;
+    }
+
+    private static (string? V4, string? V6) Addresses(IReadOnlyList<Record> records)
+    {
+        string? v4 = null;
+        string? v6 = null;
+        foreach (Record record in records)
+        {
+            if (record.Field != 5) continue;
+            if ((record.Type == (byte)RecordType.UInt32 || record.Type == (byte)RecordType.UInt32Alt)
+                && record.Payload.Length >= 4)
+            {
+                Span<byte> bytes = stackalloc byte[4];
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes, record.AsUInt32());
+                v4 = new System.Net.IPAddress(bytes).ToString();
+            }
+            else if (record.Type == 9 && record.Payload.Length == 16)
+            {
+                v6 = new System.Net.IPAddress(record.Payload).ToString();
+            }
+        }
+        return (v4, v6);
     }
 }
 

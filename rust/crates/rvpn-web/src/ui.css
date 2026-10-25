@@ -35,7 +35,9 @@ body {
   margin:0;
   background:var(--bg);
   color:var(--text);
-  font:14px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",sans-serif
+  font:14px/1.65 "Microsoft YaHei UI","Segoe UI","PingFang SC",system-ui,sans-serif;
+  font-weight:400;
+  text-rendering:optimizeLegibility;
 }
 button,input,select {
   font:inherit
@@ -354,12 +356,13 @@ main {
   margin-bottom:8px
 }
 h1 {
-  font-size:25px;
-  letter-spacing:-.6px;
-  font-weight:650
+  font-size:26px;
+  letter-spacing:0;
+  font-weight:650;
+  line-height:1.35
 }
 .page-title p {
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   margin-top:7px
 }
@@ -376,7 +379,7 @@ h1 {
   gap:8px;
   background:var(--card);
   color:var(--text);
-  font-size:11px;
+  font-size:12px;
   font-weight:500;
   white-space:nowrap;
   min-height:36px
@@ -413,7 +416,7 @@ h1 {
   border:0;
   background:transparent;
   color:var(--muted);
-  font-size:11px;
+  font-size:12px;
   padding:4px 0;
   display:inline-flex;
   align-items:center;
@@ -792,6 +795,10 @@ h1 {
   background:var(--accent-soft);
   color:#c88459
 }
+.role-badge.network-kind.private { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.role-badge.network-kind.public { color: #3a9b78; background: color-mix(in srgb, #3a9b78 12%, transparent); }
+.role-badge.network-kind.unknown { color: var(--muted); }
+.latency-bars { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 0; }
 .favorite-btn {
   font-size:19px;
   padding:0 2px;
@@ -1058,18 +1065,18 @@ input:focus,select:focus {
 table {
   border-collapse:collapse;
   width:100%;
-  font-size:11px;
+  font-size:12px;
   text-align:left
 }
 th {
-  font-size:10px;
+  font-size:11px;
   color:var(--muted);
   font-weight:500;
   background:var(--soft);
   padding:13px 18px
 }
 td {
-  padding:14px 18px;
+  padding:13px 18px;
   border-top:1px solid var(--line);
   white-space:nowrap
 }
@@ -1606,4 +1613,74 @@ dialog::backdrop {
     animation:none!important;
     transition:none!important
   }
+}
+
+/* Final visual pass: calmer typography and a denser working layout. */
+.brand,
+.page-title h1,
+.hero h2,
+.section-heading h2,
+.settings-card h3 {
+  letter-spacing:0;
+}
+.brand {
+  font-size:21px;
+  line-height:1.25;
+}
+.brand small {
+  letter-spacing:1.2px;
+}
+.sidebar {
+  width:236px;
+  padding:28px 18px 20px;
+}
+.workspace {
+  margin-left:236px;
+}
+.topbar {
+  height:70px;
+  padding:0 34px;
+}
+main {
+  padding:28px 34px 0;
+  max-width:1580px;
+}
+.card {
+  border-radius:12px;
+}
+.network-card,
+.settings-card,
+.quick-card {
+  box-shadow:0 4px 18px #25334408;
+}
+.network-card h3,
+.device-card h3,
+.settings-card h3 {
+  font-weight:600;
+}
+.member-label {
+  line-height:1.35;
+}
+.member-label small {
+  margin-top:2px;
+}
+.latency-bars {
+  display:inline-block;
+  min-width:52px;
+  font-size:10px;
+  vertical-align:middle;
+}
+.status-pill {
+  line-height:1.4;
+}
+@media(max-width:850px) {
+  .sidebar { width:72px; }
+  .workspace { margin-left:72px; }
+  main { padding-left:24px; padding-right:24px; }
+}
+@media(max-width:620px) {
+  .workspace { margin-left:58px; }
+  main { padding-left:16px; padding-right:16px; }
+  h1 { font-size:22px; }
+  .page-title p { font-size:11px; }
 }

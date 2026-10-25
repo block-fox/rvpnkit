@@ -7,16 +7,18 @@ pub(super) fn read_state() -> Result<(SnapshotState, bool), String> {
     let mut pipe = PipeClient::connect(DEFAULT_PIPE).map_err(|e| e.to_string())?;
     let can_write = pipe.can_write();
     let raw = pipe
-        .read_snapshot(Duration::from_millis(2500))
+        .read_snapshot(Duration::from_millis(1200))
         .map_err(|e| e.to_string())?;
-    Ok((SnapshotState::parse(&raw), can_write))
+    let mut state = SnapshotState::parse(&raw);
+    rvpn_core::connections::enrich(&mut state);
+    Ok((state, can_write))
 }
 
 pub(super) fn read_public(search: &str) -> Result<Vec<String>, String> {
     let joined: Vec<String> = {
         let mut p = PipeClient::connect(DEFAULT_PIPE).map_err(|e| e.to_string())?;
         let raw = p
-            .read_snapshot(Duration::from_millis(1500))
+            .read_snapshot(Duration::from_millis(900))
             .map_err(|e| e.to_string())?;
         SnapshotState::parse(&raw)
             .networks
@@ -32,7 +34,7 @@ pub(super) fn read_public(search: &str) -> Result<Vec<String>, String> {
     pipe.send(&Commands::enum_public_networks("", next_request_id()))
         .map_err(|e| e.to_string())?;
     let raw = pipe
-        .read_snapshot(Duration::from_millis(2500))
+        .read_snapshot(Duration::from_millis(1200))
         .map_err(|e| e.to_string())?;
     Ok(PublicNetworks::available(&raw, &joined, Some(search)))
 }
